@@ -10,3 +10,8 @@
 1. **`Cannot find module 'pg'`.** Installed @types/pg (type definitions only) but not the actual pg runtime package. Fix: npm install pg.
 2. **`password authentication failed for user "postgres"`.** Left the literal placeholder "YOUR_POSTGRES_PASSWORD" in server.ts instead of the real password. Fix: replaced with actual value, then migrated to .env shortly after to avoid hardcoding credentials in source at all.
 3. **No resend/replay option found in Razorpay's test-mode webhook dashboard.** Used curl with a duplicate x-razorpay-event-id header to replay a request directly against the local server instead — proved dedup without needing dashboard support for it.
+
+
+## Day 3
+1. **Correlated-failures signal was meaningless on first synthetic batch.** All 10 synthetic events were inserted back-to-back in one script run, giving them near-identical timestamps — so the 30-minute correlation window matched every event at the same bank regardless of intended cause, not just the deliberate systemic_bank_outage cluster. Non-outage events showed false-positive correlation counts (1-2) instead of 0. Fix: added explicit offsetMinutes per template so isolated events are hours/days apart and only the outage cluster falls within the same 30-min window. Re-ran and confirmed correlatedFailuresAtSameBank: 3 only on the outage cluster, 0 everywhere else.
+2. **customerFailureCount untested** — no synthetic customer currently has more than one failure, so this signal hasn't been validated against real repeat-failure data yet. To be exercised in Day 4 once diagnosis runs against events with actual customer history, or tested manually before then.

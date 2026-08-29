@@ -39,3 +39,8 @@
 
 
 
+## Day 5
+- Verifier (verify.ts) is pure deterministic logic, zero API calls -- enforces: systemic_bank_outage requires >=2 correlated failures; customer-specific causes (insufficient_funds/expired_card) are flagged if correlation is actually >=2 (looks systemic, not isolated); confidence must be in [0,1]. Anything failing an invariant is downgraded to ambiguous, not silently accepted.
+- diagnoseBatch.ts now stores verification.finalRootCause (post-verifier) in diagnoses table, not the raw LLM output -- makes the verifier's correction actually load-bearing, not decorative.
+- Known limitation, found via real evaluation: verifier checks evidence-consistency, not confidence-calibration. It won't catch a diagnosis that's internally consistent with evidence but still the wrong specific guess on a genuinely ambiguous case (observed: Groq's gpt-oss-120b confidently guessed insufficient_funds on an event Gemini had correctly called ambiguous). Documented as a known boundary of the current design, not silently fixed.
+

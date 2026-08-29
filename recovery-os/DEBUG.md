@@ -22,3 +22,8 @@
 2. **429 rate limit mid-batch.** Gemini free tier: 5 requests/minute for gemini-3.6-flash. Batch of 10 diagnosis calls with no delay hit this after ~5-6 calls. Fix: added 13s sleep between calls in diagnoseBatch.ts. Flagged as a constraint for Day 10 (evaluation) and Day 12 (live demo) — full batches must be pre-run and cached, not run live on camera.
 
 
+## Day 5
+1. **diagnoseBatch.ts became a duplicate of diagnose.ts.** At some point diagnoseBatch.ts's real content (the batch loop + verifier integration) was overwritten with a full copy of diagnose.ts's single-event logic, including the old llama-3.3-70b-versatile model name -- explains why fixing diagnose.ts alone didn't resolve the 404. Fix: restored diagnoseBatch.ts to import diagnose() and verify() rather than containing its own copy of either.
+2. **Groq deprecated llama-3.3-70b-versatile** (confirmed via Groq's own deprecation notice) -- switched to openai/gpt-oss-120b, their current recommended general-purpose/reasoning model.
+3. **9/10 accuracy on batch_1 with Groq (vs 10/10 with Gemini).** One ambiguous-labeled event was confidently misdiagnosed as insufficient_funds. Verifier did not catch it, since the claim didn't contradict the evidence (0 correlated failures is consistent with insufficient_funds) -- it just wasn't the most defensible read of genuinely thin evidence. Verifier checks evidence-consistency, not confidence-calibration on low-information cases. Logged as a known limitation, not patched today (would need a new invariant, e.g. flagging high-confidence claims when error_description is generic and correlation is near-zero).
+

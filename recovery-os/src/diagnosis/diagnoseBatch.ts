@@ -6,11 +6,13 @@ import { verify } from "../verifier/verify";
 
 const pool = new Pool();
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 async function diagnoseAllInBatch(batchName: string) {
+  // Clear any previous diagnoses for this batch first, so reruns never leave stale duplicates behind
+  await pool.query(
+    `DELETE FROM diagnoses WHERE event_id IN (SELECT event_id FROM recovery_batches WHERE batch_name = $1)`,
+    [batchName]
+  );
+
   const batchResult = await pool.query(
     "SELECT event_id, ground_truth_cause FROM recovery_batches WHERE batch_name = $1",
     [batchName]

@@ -44,3 +44,11 @@
 - diagnoseBatch.ts now stores verification.finalRootCause (post-verifier) in diagnoses table, not the raw LLM output -- makes the verifier's correction actually load-bearing, not decorative.
 - Known limitation, found via real evaluation: verifier checks evidence-consistency, not confidence-calibration. It won't catch a diagnosis that's internally consistent with evidence but still the wrong specific guess on a genuinely ambiguous case (observed: Groq's gpt-oss-120b confidently guessed insufficient_funds on an event Gemini had correctly called ambiguous). Documented as a known boundary of the current design, not silently fixed.
 
+
+## Day 6
+- chooseAction.ts: LLM selects one action from a fixed 5-action menu (retry_now, retry_with_backoff, offer_alternate_payment_method, whatsapp_nudge, escalate_to_human) via forced function-calling -- same enum-constraint pattern as diagnosis, structurally cannot invent a new action.
+- policyGate.ts: pure deterministic logic, zero API calls. Enforces max automated retries (3) and max WhatsApp contacts/day (1) -- caps that override the LLM's chosen action regardless of confidence, forcing escalate_to_human when tripped.
+- interventions table stores both chosen_action (LLM's raw pick) and final_action (post-gate) -- same audit pattern as diagnoses.root_cause vs verifier's finalRootCause.
+- Known simplification: customerFailureCount and customerContactedInLast24h are hardcoded to 0/false in interveneOnBatch.ts, since no synthetic customer in batch_1 currently has repeat failures or contacts. Policy gate's blocking behavior is proven in isolation (testPolicyGate.ts, 4/4 expected outcomes) but not yet exercised against real batch data with repeat customers. To be addressed when batch_1 is expanded or during Day 9 hardening.
+
+

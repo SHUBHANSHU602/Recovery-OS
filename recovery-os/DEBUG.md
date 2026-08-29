@@ -27,3 +27,9 @@
 2. **Groq deprecated llama-3.3-70b-versatile** (confirmed via Groq's own deprecation notice) -- switched to openai/gpt-oss-120b, their current recommended general-purpose/reasoning model.
 3. **9/10 accuracy on batch_1 with Groq (vs 10/10 with Gemini).** One ambiguous-labeled event was confidently misdiagnosed as insufficient_funds. Verifier did not catch it, since the claim didn't contradict the evidence (0 correlated failures is consistent with insufficient_funds) -- it just wasn't the most defensible read of genuinely thin evidence. Verifier checks evidence-consistency, not confidence-calibration on low-information cases. Logged as a known limitation, not patched today (would need a new invariant, e.g. flagging high-confidence claims when error_description is generic and correlation is near-zero).
 
+
+## Day 6
+1. **interveneOnBatch.ts ran on tripled data.** diagnoses table had 3 stale rows per event from repeated Day 5 troubleshooting runs; interveneOnBatch's join against recovery_batches pulled all 3 copies per event with no dedup, producing 30 intervention runs instead of 10. Fix: added a DELETE at the start of diagnoseAllInBatch so every rerun clears prior diagnoses for that batch first, preventing stale accumulation going forward.
+2. **Top-level await crashed the CJS build.** Pasted the new DELETE query's await outside diagnoseAllInBatch's function body (at module top level) -- CommonJS output doesn't support top-level await. Fix: moved it inside the async function, as the very first statement.
+
+

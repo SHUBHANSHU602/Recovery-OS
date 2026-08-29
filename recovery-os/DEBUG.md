@@ -15,3 +15,10 @@
 ## Day 3
 1. **Correlated-failures signal was meaningless on first synthetic batch.** All 10 synthetic events were inserted back-to-back in one script run, giving them near-identical timestamps — so the 30-minute correlation window matched every event at the same bank regardless of intended cause, not just the deliberate systemic_bank_outage cluster. Non-outage events showed false-positive correlation counts (1-2) instead of 0. Fix: added explicit offsetMinutes per template so isolated events are hours/days apart and only the outage cluster falls within the same 30-min window. Re-ran and confirmed correlatedFailuresAtSameBank: 3 only on the outage cluster, 0 everywhere else.
 2. **customerFailureCount untested** — no synthetic customer currently has more than one failure, so this signal hasn't been validated against real repeat-failure data yet. To be exercised in Day 4 once diagnosis runs against events with actual customer history, or tested manually before then.
+
+
+## Day 4
+1. **Silent extra API call from unguarded main().** diagnose.ts's main() ran automatically on import (no require.main === module guard), so importing diagnose() into diagnoseBatch.ts triggered one extra, unlogged diagnosis call before the real batch loop started. This caused the batch to hit Gemini's rate limit one call earlier than expected. Fix: wrapped main() in an explicit require.main === module check so it only auto-runs when the file is executed directly.
+2. **429 rate limit mid-batch.** Gemini free tier: 5 requests/minute for gemini-3.6-flash. Batch of 10 diagnosis calls with no delay hit this after ~5-6 calls. Fix: added 13s sleep between calls in diagnoseBatch.ts. Flagged as a constraint for Day 10 (evaluation) and Day 12 (live demo) — full batches must be pre-run and cached, not run live on camera.
+
+

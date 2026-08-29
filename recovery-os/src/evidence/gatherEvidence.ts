@@ -3,7 +3,7 @@ import { Pool } from "pg";
 
 const pool = new Pool();
 
-interface EvidenceBundle {
+export interface EvidenceBundle {
   eventId: string;
   errorCode: string;
   errorDescription: string;
@@ -14,7 +14,7 @@ interface EvidenceBundle {
   correlatedFailuresAtSameBank: number;
 }
 
-async function gatherEvidence(eventId: string): Promise<EvidenceBundle> {
+export async function gatherEvidence(eventId: string): Promise<EvidenceBundle> {
   // 1. Pull the event itself
   const eventResult = await pool.query(
     "SELECT payload FROM events WHERE event_id = $1",
@@ -79,7 +79,9 @@ async function testAll() {
   await pool.end();
 }
 
-testAll().catch((err) => {
-  console.error("Evidence gathering failed:", err);
-  process.exit(1);
-});
+if (require.main === module) {
+  testAll().catch((err) => {
+    console.error("Evidence gathering failed:", err);
+    process.exit(1);
+  });
+}

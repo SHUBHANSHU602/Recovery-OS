@@ -31,3 +31,11 @@
 - recovery_batches.event_id is a foreign key into events(event_id) — Postgres physically rejects an orphaned synthetic label, keeping ground-truth data always in sync with real event rows.
 
 
+## Day 4
+- LLM provider switched from Anthropic Claude to Google Gemini (gemini-3.6-flash) — practical constraint: Gemini key already available free, Anthropic API is paid. Original pitch angle ("matches Razorpay's Claude-based stack") no longer applies; architecture (evidence -> diagnosis -> verifier -> policy gate) is the actual differentiator.
+- Diagnosis structured output enforced via Gemini's forced function-calling (functionCallingConfig.mode: "ANY" + allowedFunctionNames) — same role as tool_choice, guarantees root_cause is always one of four enum values.
+- diagnose.ts and gatherEvidence.ts both export their core functions so diagnoseBatch.ts (and later scripts) reuse the same logic rather than duplicating it — avoids evidence-gathering implementations drifting apart.
+- Gemini free tier caps at 5 requests/minute for gemini-3.6-flash — added a 13s delay between diagnosis calls in batch runs. Fine for the real webhook loop (events arrive one at a time in practice), but means full batch evaluation (Day 10) and any live demo (Day 12) must use pre-run/cached results rather than running the whole batch on camera. Revisit paid tier before submission if budget allows.
+
+
+

@@ -6,7 +6,9 @@ const pool = new Pool();
 
 async function executeAllInBatch(batchName: string) {
   const result = await pool.query(
-    `SELECT i.id AS intervention_id, i.final_action, d.event_id, (e.payload->'payload'->'payment'->'entity'->>'amount')::int AS amount
+    `SELECT i.id AS intervention_id, i.final_action, d.event_id,
+            (e.payload->'payload'->'payment'->'entity'->>'amount')::int AS amount,
+            e.payload->'payload'->'payment'->'entity'->>'email' AS customer_email
      FROM interventions i
      JOIN diagnoses d ON d.id = i.diagnosis_id
      JOIN events e ON e.event_id = d.event_id
@@ -21,6 +23,7 @@ async function executeAllInBatch(batchName: string) {
       interventionId: row.intervention_id,
       finalAction: row.final_action,
       amount: row.amount,
+      customerEmail: row.customer_email,
     });
   }
 }

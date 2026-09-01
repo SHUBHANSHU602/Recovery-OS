@@ -64,7 +64,17 @@ async function diagnoseAllInBatch(batchName: string) {
 
 diagnoseAllInBatch("batch_1")
   .catch((err) => {
-    console.error("Batch diagnosis failed:", err);
-    process.exitCode = 1;
+  // Compute accuracy from actual current data, not just events processed in this run --
+  // this stays correct even when most/all events were skipped as already-diagnosed.
+  const finalCheck = await pool.query(
+    `SELECT d.root_cause, rb.ground_truth_cause
+     FROM diagnoses d
+     JOIN recovery_batches rb ON rb.event_id = d.event_id
+     WHERE rb.batch_name = $1`,
+    [batchName]
+  );
+  const totalCorrect = finalCheck.rows.filter(r => r.root_cause === r.ground_truth_cause).length;
+  console.log(`\n=== Accuracy (current stored state): ${totalCorrect}/${finalCheck.rows.length} ===`);
+  console.log(`=== Verifier intervened on (this run only): ${verifierCaught}/${batchResult.rows.length} ===`);
   })
   .finally(() => pool.end());

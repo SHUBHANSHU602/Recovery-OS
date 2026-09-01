@@ -65,3 +65,7 @@
 - System prompt is built per-conversation with known customer context (email, amount) injected directly -- the agent must never ask the customer for information the backend already has.
 - generatePaymentLink() reuses the exact idempotency pattern from Day 7 (stable key: eventId + action type, checked before any Razorpay call) -- applied proactively this time rather than repeating the Day 7 mistake.
 - actions.intervention_id made nullable -- conversational payment links aren't tied to a single automated intervention row, unlike Day 7's batch executions.
+
+## Day 9
+- execute.ts now routes whatsapp_nudge and offer_alternate_payment_method into the conversational agent (Day 8) rather than treating them as unimplemented -- agent sends a templated opening message, then reasons freely for all follow-up turns. Opening message is deliberately templated (not LLM-generated) since it's a known, consistent trigger; the actual reasoning work is in how the agent responds to what the customer says back.
+- diagnoseBatch.ts's accuracy metric now recomputes from actual stored diagnoses each run, not just events processed in that specific run -- stays correct even when most/all events are skipped as already-diagnosed.

@@ -3,15 +3,12 @@ import { Pool } from "pg";
 import { gatherEvidence } from "../evidence/gatherEvidence";
 import { diagnose } from "./diagnose";
 import { verify } from "../verifier/verify";
+import { logAuditEvent } from "../ledger/auditLog";
 
 const pool = new Pool();
 
 async function diagnoseAllInBatch(batchName: string) {
-  // Clear any previous diagnoses for this batch first, so reruns never leave stale duplicates behind
-  await pool.query(
-    `DELETE FROM diagnoses WHERE event_id IN (SELECT event_id FROM recovery_batches WHERE batch_name = $1)`,
-    [batchName]
-  );
+ 
 
   const batchResult = await pool.query(
     "SELECT event_id, ground_truth_cause FROM recovery_batches WHERE batch_name = $1",
@@ -22,9 +19,27 @@ async function diagnoseAllInBatch(batchName: string) {
   let verifierCaught = 0;
 
   for (const row of batchResult.rows) {
+    const already = await pool.query("SELECT id FROM diagnoses WHERE event_id = $1", [row.event_id]);
+    if (already.rows.length > 0) {
+    console.log(`Skipping ${row.event_id} — already diagnosed.`);
+    continue;
+    }
     const evidence = await gatherEvidence(row.event_id);
     const diagnosis = await diagnose(evidence);
+
+    await logAuditEvent(row.event_id, "diagnosis", {
+      root_cause: diagnosis.root_cause,
+      confidence: diagnosis.confidence,
+      rationale: diagnosis.rationale,
+    });
+
     const verification = verify(diagnosis, evidence);
+
+    await logAuditEvent(row.event_id, "verification", {
+      result: verification.result,
+      reason: verification.reason,
+      finalRootCause: verification.finalRootCause,
+    });
 
     if (verification.result !== "PASSED") verifierCaught++;
 

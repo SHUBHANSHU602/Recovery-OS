@@ -2,11 +2,13 @@ import "dotenv/config";
 import { Pool } from "pg";
 import { chooseAction } from "./chooseAction";
 import { applyPolicyGate } from "./policyGate";
+import { logAuditEvent } from "../ledger/auditLog";
 
 const pool = new Pool();
 
 async function interveneOnBatch(batchName: string) {
-  // Get every diagnosis produced for this batch (from Day 5's run)
+  
+
   const diagnosesResult = await pool.query(
     `SELECT d.id AS diagnosis_id, d.event_id, d.root_cause, d.confidence
      FROM diagnoses d
@@ -16,9 +18,11 @@ async function interveneOnBatch(batchName: string) {
   );
 
   for (const row of diagnosesResult.rows) {
-    // In real data every synthetic customer has 0 prior failures (Day 3 built them that way) --
-    // hardcoding 0/false here for now since we don't have a live customer-history query wired up yet.
-    // This is a known simplification, not a bug -- flagged below.
+    const already = await pool.query("SELECT id FROM interventions WHERE diagnosis_id = $1", [row.diagnosis_id]);
+    if (already.rows.length > 0) {
+    console.log(`Skipping ${row.event_id} — already has an intervention.`);
+    continue;
+    }
     const customerFailureCount = 0;
     const customerContactedInLast24h = false;
 
@@ -28,10 +32,21 @@ async function interveneOnBatch(batchName: string) {
       customerFailureCount,
     });
 
+    await logAuditEvent(row.event_id, "intervention_chosen", {
+      chosen_action: intervention.chosen_action,
+      reasoning: intervention.reasoning,
+    });
+
     const policyOutcome = applyPolicyGate({
       chosenAction: intervention.chosen_action,
       customerFailureCount,
       customerContactedInLast24h,
+    });
+
+    await logAuditEvent(row.event_id, "policy_check", {
+      result: policyOutcome.result,
+      reason: policyOutcome.reason,
+      finalAction: policyOutcome.finalAction,
     });
 
     await pool.query(
@@ -42,7 +57,6 @@ async function interveneOnBatch(batchName: string) {
     console.log(`\nEvent: ${row.event_id}`);
     console.log(`  Root cause: ${row.root_cause}`);
     console.log(`  LLM chose: ${intervention.chosen_action} | Policy: ${policyOutcome.result} | Final: ${policyOutcome.finalAction}`);
-    console.log(`  Reasoning: ${intervention.reasoning}`);
   }
 }
 

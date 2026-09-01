@@ -52,3 +52,10 @@
 - Known simplification: customerFailureCount and customerContactedInLast24h are hardcoded to 0/false in interveneOnBatch.ts, since no synthetic customer in batch_1 currently has repeat failures or contacts. Policy gate's blocking behavior is proven in isolation (testPolicyGate.ts, 4/4 expected outcomes) but not yet exercised against real batch data with repeat customers. To be addressed when batch_1 is expanded or during Day 9 hardening.
 
 
+## Day 7
+- Added actions table (intervention_id FK, idempotency_key UNIQUE, status, response) and audit_log table (event_id FK, stage, detail JSONB) -- append-only record of every pipeline stage.
+- auditLog.ts: single logAuditEvent() function used by every stage (diagnosis, verification, intervention, policy_check, execution) -- one code path writes to the ledger, not scattered inserts.
+- execute.ts implements retry_with_backoff only for Day 7 (real Razorpay test-mode payment_links.create call); other action types log execution_not_implemented rather than silently no-op, honestly reflecting current scope.
+- Idempotency check happens before any Razorpay API call, backed by a DB-level UNIQUE constraint on idempotency_key -- not just an application-level check.
+
+

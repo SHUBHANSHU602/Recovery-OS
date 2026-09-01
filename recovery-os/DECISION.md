@@ -59,3 +59,9 @@
 - Idempotency check happens before any Razorpay API call, backed by a DB-level UNIQUE constraint on idempotency_key -- not just an application-level check.
 
 
+## Day 8
+- conversations table stores full message history as JSONB per event, status tracks active/resolved/escalated.
+- Conversational agent uses a tool-calling while-loop (not a single call) -- keeps resolving tool calls until the model responds with plain text, since a single customer message may need multiple tool calls before a reply makes sense.
+- System prompt is built per-conversation with known customer context (email, amount) injected directly -- the agent must never ask the customer for information the backend already has.
+- generatePaymentLink() reuses the exact idempotency pattern from Day 7 (stable key: eventId + action type, checked before any Razorpay call) -- applied proactively this time rather than repeating the Day 7 mistake.
+- actions.intervention_id made nullable -- conversational payment links aren't tied to a single automated intervention row, unlike Day 7's batch executions.

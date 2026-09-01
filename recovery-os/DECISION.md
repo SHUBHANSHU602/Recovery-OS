@@ -69,3 +69,8 @@
 ## Day 9
 - execute.ts now routes whatsapp_nudge and offer_alternate_payment_method into the conversational agent (Day 8) rather than treating them as unimplemented -- agent sends a templated opening message, then reasons freely for all follow-up turns. Opening message is deliberately templated (not LLM-generated) since it's a known, consistent trigger; the actual reasoning work is in how the agent responds to what the customer says back.
 - diagnoseBatch.ts's accuracy metric now recomputes from actual stored diagnoses each run, not just events processed in that specific run -- stays correct even when most/all events are skipped as already-diagnosed.
+
+
+## Day 10
+- Expanded batch_1 from 10 to 25 synthetic events for final evaluation: broader cause coverage, two independent systemic_bank_outage clusters (AXIS and KOTAK, different banks and time windows) to test correlation logic generalizes rather than fitting one hardcoded cluster, and a repeat-customer case (customer20, 3 failures) to exercise customerFailureCount.
+- runEvaluation.ts computes 4 metrics from real stored data: diagnosis accuracy, verifier intervention rate, recovery rate (proxy: successful action initiation, not confirmed customer payment completion -- test mode has no real customer to complete the loop), and false-escalation rate (escalating a genuinely ambiguous case is correct behavior, not counted as false).

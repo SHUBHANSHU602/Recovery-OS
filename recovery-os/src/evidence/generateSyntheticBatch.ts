@@ -12,26 +12,49 @@ interface SyntheticEvent {
   errorDescription: string;
   customerEmail: string;
   bank: string;
-  // offsetMinutes: how far back from "now" this event happened, in minutes
   offsetMinutes: number;
 }
 
 const templates: SyntheticEvent[] = [
-  // Isolated events -- spread far apart (hours/days), so they never fall in each other's 30-min window
-  { cause: "insufficient_funds", errorCode: "BAD_REQUEST_ERROR", errorDescription: "Insufficient balance in account", customerEmail: "customer1@example.com", bank: "HDFC", offsetMinutes: 60 * 24 * 3 },      // 3 days ago
-  { cause: "insufficient_funds", errorCode: "BAD_REQUEST_ERROR", errorDescription: "Insufficient balance in account", customerEmail: "customer2@example.com", bank: "ICICI", offsetMinutes: 60 * 24 * 2 },     // 2 days ago
-  { cause: "expired_card", errorCode: "GATEWAY_ERROR", errorDescription: "Card has expired", customerEmail: "customer3@example.com", bank: "HDFC", offsetMinutes: 60 * 5 },                                    // 5 hours ago
-  { cause: "expired_card", errorCode: "GATEWAY_ERROR", errorDescription: "Card has expired", customerEmail: "customer4@example.com", bank: "SBI", offsetMinutes: 60 * 8 },                                     // 8 hours ago
+  // Isolated insufficient_funds -- spread across days
+  { cause: "insufficient_funds", errorCode: "BAD_REQUEST_ERROR", errorDescription: "Insufficient balance in account", customerEmail: "customer1@example.com", bank: "HDFC", offsetMinutes: 60 * 24 * 3 },
+  { cause: "insufficient_funds", errorCode: "BAD_REQUEST_ERROR", errorDescription: "Insufficient balance in account", customerEmail: "customer2@example.com", bank: "ICICI", offsetMinutes: 60 * 24 * 2 },
+  { cause: "insufficient_funds", errorCode: "BAD_REQUEST_ERROR", errorDescription: "Insufficient balance in account", customerEmail: "customer11@example.com", bank: "SBI", offsetMinutes: 60 * 24 * 5 },
+  { cause: "insufficient_funds", errorCode: "BAD_REQUEST_ERROR", errorDescription: "Insufficient balance in account", customerEmail: "customer12@example.com", bank: "KOTAK", offsetMinutes: 60 * 10 },
 
-  // Systemic outage: SAME bank, all within a few minutes of each other -- this is the real cluster
+  // Isolated expired_card
+  { cause: "expired_card", errorCode: "GATEWAY_ERROR", errorDescription: "Card has expired", customerEmail: "customer3@example.com", bank: "HDFC", offsetMinutes: 60 * 5 },
+  { cause: "expired_card", errorCode: "GATEWAY_ERROR", errorDescription: "Card has expired", customerEmail: "customer4@example.com", bank: "SBI", offsetMinutes: 60 * 8 },
+  { cause: "expired_card", errorCode: "GATEWAY_ERROR", errorDescription: "Card has expired", customerEmail: "customer13@example.com", bank: "ICICI", offsetMinutes: 60 * 30 },
+  { cause: "expired_card", errorCode: "GATEWAY_ERROR", errorDescription: "Card has expired", customerEmail: "customer14@example.com", bank: "AXIS", offsetMinutes: 60 * 45 },
+
+  // Systemic outage cluster #1: AXIS, ~8 min spread
   { cause: "systemic_bank_outage", errorCode: "GATEWAY_ERROR", errorDescription: "Payment authorization timed out", customerEmail: "customer5@example.com", bank: "AXIS", offsetMinutes: 30 },
   { cause: "systemic_bank_outage", errorCode: "GATEWAY_ERROR", errorDescription: "Payment authorization timed out", customerEmail: "customer6@example.com", bank: "AXIS", offsetMinutes: 28 },
   { cause: "systemic_bank_outage", errorCode: "GATEWAY_ERROR", errorDescription: "Payment authorization timed out", customerEmail: "customer7@example.com", bank: "AXIS", offsetMinutes: 25 },
   { cause: "systemic_bank_outage", errorCode: "GATEWAY_ERROR", errorDescription: "Payment authorization timed out", customerEmail: "customer8@example.com", bank: "AXIS", offsetMinutes: 22 },
 
-  // Ambiguous -- isolated in time, deliberately hard to classify from error code alone
-  { cause: "ambiguous", errorCode: "BAD_REQUEST_ERROR", errorDescription: "Payment declined by issuer", customerEmail: "customer9@example.com", bank: "ICICI", offsetMinutes: 60 * 30 },   // 30 hours ago
-  { cause: "ambiguous", errorCode: "BAD_REQUEST_ERROR", errorDescription: "Payment declined by issuer", customerEmail: "customer10@example.com", bank: "HDFC", offsetMinutes: 60 * 50 },   // 50 hours ago
+  // Systemic outage cluster #2: KOTAK, different time window entirely -- tests the correlation logic
+  // catches a SECOND, independent cluster, not just the one it happened to be built around
+  { cause: "systemic_bank_outage", errorCode: "GATEWAY_ERROR", errorDescription: "Payment authorization timed out", customerEmail: "customer15@example.com", bank: "KOTAK", offsetMinutes: 120 },
+  { cause: "systemic_bank_outage", errorCode: "GATEWAY_ERROR", errorDescription: "Payment authorization timed out", customerEmail: "customer16@example.com", bank: "KOTAK", offsetMinutes: 118 },
+  { cause: "systemic_bank_outage", errorCode: "GATEWAY_ERROR", errorDescription: "Payment authorization timed out", customerEmail: "customer17@example.com", bank: "KOTAK", offsetMinutes: 115 },
+
+  // Ambiguous -- deliberately hard, isolated in time
+  { cause: "ambiguous", errorCode: "BAD_REQUEST_ERROR", errorDescription: "Payment declined by issuer", customerEmail: "customer9@example.com", bank: "ICICI", offsetMinutes: 60 * 30 },
+  { cause: "ambiguous", errorCode: "BAD_REQUEST_ERROR", errorDescription: "Payment declined by issuer", customerEmail: "customer10@example.com", bank: "HDFC", offsetMinutes: 60 * 50 },
+  { cause: "ambiguous", errorCode: "BAD_REQUEST_ERROR", errorDescription: "Payment declined by issuer", customerEmail: "customer18@example.com", bank: "SBI", offsetMinutes: 60 * 15 },
+  { cause: "ambiguous", errorCode: "GATEWAY_ERROR", errorDescription: "Transaction could not be processed", customerEmail: "customer19@example.com", bank: "KOTAK", offsetMinutes: 60 * 60 },
+
+  // Repeat-customer case: same customer failing twice, days apart -- exercises customerFailureCount
+  { cause: "insufficient_funds", errorCode: "BAD_REQUEST_ERROR", errorDescription: "Insufficient balance in account", customerEmail: "customer20@example.com", bank: "HDFC", offsetMinutes: 60 * 24 * 4 },
+  { cause: "insufficient_funds", errorCode: "BAD_REQUEST_ERROR", errorDescription: "Insufficient balance in account", customerEmail: "customer20@example.com", bank: "HDFC", offsetMinutes: 60 * 24 * 1 },
+  { cause: "expired_card", errorCode: "GATEWAY_ERROR", errorDescription: "Card has expired", customerEmail: "customer20@example.com", bank: "HDFC", offsetMinutes: 60 * 3 },
+
+  // A couple more isolated cases for volume
+  { cause: "expired_card", errorCode: "GATEWAY_ERROR", errorDescription: "Card has expired", customerEmail: "customer21@example.com", bank: "ICICI", offsetMinutes: 60 * 70 },
+  { cause: "insufficient_funds", errorCode: "BAD_REQUEST_ERROR", errorDescription: "Insufficient balance in account", customerEmail: "customer22@example.com", bank: "AXIS", offsetMinutes: 60 * 24 * 6 },
+  { cause: "ambiguous", errorCode: "BAD_REQUEST_ERROR", errorDescription: "Payment declined by issuer", customerEmail: "customer23@example.com", bank: "HDFC", offsetMinutes: 60 * 90 },
 ];
 
 async function generateBatch(batchName: string) {

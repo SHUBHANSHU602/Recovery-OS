@@ -11,6 +11,7 @@ import { logAuditEvent } from "../ledger/auditLog";
 import { ensureRecoveryCase, ensureTrack3Schema, setRecoveryState } from "./recoveryStore";
 
 const pool = new Pool();
+const STALE_JOB_MINUTES = 5;
 
 export async function processRecoveryCase(eventId: string): Promise<void> {
   await ensureTrack3Schema(pool);
@@ -20,9 +21,13 @@ export async function processRecoveryCase(eventId: string): Promise<void> {
   const claimed = await pool.query(
     `UPDATE recovery_jobs
      SET status = 'RUNNING', claimed_at = now(), attempt_count = attempt_count + 1, updated_at = now()
-     WHERE case_id = $1 AND status IN ('PENDING', 'FAILED')
+     WHERE case_id = $1
+       AND (
+         status IN ('PENDING', 'FAILED')
+         OR (status = 'RUNNING' AND claimed_at < now() - ($2 * interval '1 minute'))
+       )
      RETURNING case_id`,
-    [caseId]
+    [caseId, STALE_JOB_MINUTES]
   );
   if (claimed.rows.length === 0) return;
 
@@ -109,9 +114,10 @@ export async function processPendingRecoveryJobs(limit = 10): Promise<void> {
      FROM recovery_jobs j
      JOIN recovery_cases rc ON rc.id = j.case_id
      WHERE j.status IN ('PENDING', 'FAILED')
+        OR (j.status = 'RUNNING' AND j.claimed_at < now() - ($2 * interval '1 minute'))
      ORDER BY j.updated_at ASC
      LIMIT $1`,
-    [limit]
+    [limit, STALE_JOB_MINUTES]
   );
   for (const row of jobs.rows) await processRecoveryCase(row.original_event_id);
 }

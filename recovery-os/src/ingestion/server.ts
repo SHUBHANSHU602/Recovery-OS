@@ -57,7 +57,6 @@ async function processWebhookDelivery(eventId: string): Promise<"processed" | "b
       const caseId = await ensureRecoveryCase(pool, eventId);
       if (!caseId) throw new Error("payment.failed payload did not contain a payment entity");
       await logAuditEvent(eventId, "trusted_webhook_ingested", { eventType, caseId });
-      // Durable intent is now in recovery_jobs; webhook processing is complete once that handoff succeeds.
       setImmediate(() => {
         processPendingRecoveryJobs().catch((error) => console.error("Recovery worker failed:", error));
       });
@@ -108,11 +107,35 @@ async function processWebhookDelivery(eventId: string): Promise<"processed" | "b
   }
 }
 
+async function persistWebhook(eventId: string, eventType: string, body: any): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `INSERT INTO events (event_id, event_type, payload)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (event_id) DO NOTHING`,
+      [eventId, eventType, body]
+    );
+    await client.query(
+      `INSERT INTO webhook_deliveries (event_id, event_type, status)
+       VALUES ($1, $2, 'RECEIVED')
+       ON CONFLICT (event_id) DO NOTHING`,
+      [eventId, eventType]
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function runWorkers(): Promise<void> {
   await Promise.all([processPendingRecoveryJobs(), processDueScheduledActions()]);
 }
 
-// Raw body is mandatory for Razorpay HMAC verification. Keep this route before generic JSON parsing.
 app.post(
   "/webhooks/razorpay",
   express.raw({ type: "application/json" }),
@@ -150,21 +173,7 @@ app.post(
 
     try {
       await ensureTrack3Schema(pool);
-      await pool.query("BEGIN");
-      await pool.query(
-        `INSERT INTO events (event_id, event_type, payload)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (event_id) DO NOTHING`,
-        [eventId, eventType, body]
-      );
-      await pool.query(
-        `INSERT INTO webhook_deliveries (event_id, event_type, status)
-         VALUES ($1, $2, 'RECEIVED')
-         ON CONFLICT (event_id) DO NOTHING`,
-        [eventId, eventType]
-      );
-      await pool.query("COMMIT");
-
+      await persistWebhook(eventId, eventType, body);
       const outcome = await processWebhookDelivery(eventId);
       if (outcome === "busy") {
         res.status(202).send("Webhook is already being processed");
@@ -172,11 +181,6 @@ app.post(
       }
       res.status(200).send("OK");
     } catch (error: any) {
-      try {
-        await pool.query("ROLLBACK");
-      } catch {
-        // Transaction may already have committed; processing state still records downstream failure.
-      }
       console.error("Webhook processing error:", error.message);
       res.status(500).send("Internal error");
     }

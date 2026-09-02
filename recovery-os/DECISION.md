@@ -152,3 +152,12 @@
 **Decision:** `actions` represents attempted side effects and conversations; `recoveries` represents externally confirmed business outcomes; `scheduled_recovery_actions` represents deferred work. `actions.event_id` is added so every new action has a direct, queryable link to the failed payment.
 
 This separation makes three questions independently auditable: what the system decided, what it attempted, and what money was actually recovered.
+
+### Decision 13: webhook replay must resume incomplete stages, not merely deduplicate storage
+**Problem:** idempotent storage and idempotent business processing are different. If an event is inserted and the process dies after diagnosis but before intervention/execution, simply returning "already processed" on webhook replay turns the database row into a dead end. Likewise, treating "diagnosis exists" as "pipeline finished" loses the remaining work.
+
+**Decision:** valid duplicate webhooks are allowed to re-enter the processing dispatcher without inserting another event row. `processRecoveryEvent()` is stage-resumable: it reuses an existing diagnosis, fills in a missing intervention, reuses an existing intervention, and always reaches the idempotent executor. A Postgres advisory lock keyed by the failed event ID serializes concurrent processing of the same payment failure.
+
+**Why advisory locking instead of only another unique index:** older development data may already contain duplicate diagnosis rows, and adding a unique index safely would require cleanup across dependent foreign keys. The event-scoped lock gives immediate concurrency control without destructive migration of historical test data.
+
+**Trade-off:** the lock is held while the event pipeline performs LLM/policy work, so one database connection remains occupied for that event. That is acceptable at current hackathon scale and safer than concurrent double-processing. A durable queued worker with explicit stage state would be the production-scale evolution.

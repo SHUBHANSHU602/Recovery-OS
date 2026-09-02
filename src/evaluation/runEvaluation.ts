@@ -25,9 +25,8 @@ async function runEvaluation(batchName: string) {
   console.log(`--- Verifier Behavior ---`);
   console.log(`Intervened on ${verifierInterventions}/${totalDiagnoses} diagnoses.\n`);
 
-  // Business outcome: one row per original failed transaction, confirmed only by trusted outcome state.
   const recoveryResult = await pool.query(
-    `SELECT rc.amount_at_risk, rc.recovered_amount, rc.status, rc.strategy
+    `SELECT rc.original_event_id, rc.amount_at_risk, rc.recovered_amount, rc.status, rc.strategy
      FROM recovery_cases rc
      JOIN recovery_batches rb ON rb.event_id = rc.original_event_id
      WHERE rb.batch_name = $1`,
@@ -47,17 +46,36 @@ async function runEvaluation(batchName: string) {
   console.log(`Transaction recovery rate: ${recoveredTransactions}/${cases.length} (${transactionRecoveryRate.toFixed(1)}%)`);
   console.log(`Unresolved amount: ₹${((atRisk - recovered) / 100).toFixed(2)}\n`);
 
-  // Operational action reliability is deliberately separate from customer recovery.
+  const strategy = new Map<string, { cases: number; recoveredCases: number; recoveredAmount: number }>();
+  for (const row of cases) {
+    const key = String(row.strategy ?? "unassigned");
+    const current = strategy.get(key) ?? { cases: 0, recoveredCases: 0, recoveredAmount: 0 };
+    current.cases += 1;
+    current.recoveredCases += row.status === "RECOVERED" ? 1 : 0;
+    current.recoveredAmount += Number(row.recovered_amount ?? 0);
+    strategy.set(key, current);
+  }
+  console.log(`--- Recovery by Strategy ---`);
+  for (const [name, metrics] of strategy.entries()) {
+    console.log(`${name}: ${metrics.recoveredCases}/${metrics.cases} recovered, ₹${(metrics.recoveredAmount / 100).toFixed(2)}`);
+  }
+  console.log();
+
+  // Match all concrete attempt/contact keys for batch events, not one legacy exact key shape.
   const actionsResult = await pool.query(
-    `SELECT a.status
+    `SELECT DISTINCT a.id, a.status
      FROM actions a
      LEFT JOIN interventions i ON i.id = a.intervention_id
      LEFT JOIN diagnoses d ON d.id = i.diagnosis_id
      LEFT JOIN recovery_batches rb ON rb.event_id = d.event_id
-     WHERE rb.batch_name = $1 OR a.idempotency_key IN (
-       SELECT original_event_id || '_retry_now' FROM recovery_cases rc
-       JOIN recovery_batches b ON b.event_id = rc.original_event_id WHERE b.batch_name = $1
-     )`,
+     WHERE rb.batch_name = $1
+        OR EXISTS (
+          SELECT 1
+          FROM recovery_cases rc
+          JOIN recovery_batches b ON b.event_id = rc.original_event_id
+          WHERE b.batch_name = $1
+            AND a.idempotency_key LIKE rc.original_event_id || '_%'
+        )`,
     [batchName]
   );
   const successfulActions = actionsResult.rows.filter((r) => r.status === "success").length;
@@ -80,6 +98,17 @@ async function runEvaluation(batchName: string) {
     : 0;
   console.log(`--- False-Escalation Rate ---`);
   console.log(`${falseEscalations}/${interventionsResult.rows.length} (${falseEscalationRate.toFixed(1)}%)\n`);
+
+  const escalationResult = await pool.query(
+    `SELECT COUNT(*)
+     FROM human_escalations he
+     JOIN recovery_cases rc ON rc.id = he.case_id
+     JOIN recovery_batches rb ON rb.event_id = rc.original_event_id
+     WHERE rb.batch_name = $1`,
+    [batchName]
+  );
+  console.log(`--- Human Escalation Work Items ---`);
+  console.log(`${Number(escalationResult.rows[0]?.count ?? 0)} durable escalation work item(s).\n`);
 
   console.log(`========== END EVALUATION ==========\n`);
 }

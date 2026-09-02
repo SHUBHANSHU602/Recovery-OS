@@ -20,23 +20,27 @@ function computeDelaySeconds(caseId: number, attempt: number, retryAfterSeconds?
   return Math.min(MAX_DELAY_SECONDS, exponential + deterministicJitterSeconds(caseId, attempt));
 }
 
+async function nextAttemptNumber(caseId: number): Promise<number> {
+  const existing = await pool.query(
+    `SELECT COUNT(*) FROM scheduled_actions
+     WHERE case_id = $1 AND desired_action = 'retry_with_backoff'`,
+    [caseId]
+  );
+  return Number(existing.rows[0]?.count ?? 0) + 1;
+}
+
 export async function scheduleBackoffRetry(
   eventId: string,
   interventionId: number | null,
   requestedDelaySeconds = BASE_DELAY_SECONDS
 ): Promise<void> {
   await ensureTrack3Schema(pool);
-  const caseResult = await pool.query("SELECT id, status FROM recovery_cases WHERE original_event_id = $1", [eventId]);
+  const caseResult = await pool.query("SELECT id FROM recovery_cases WHERE original_event_id = $1", [eventId]);
   if (caseResult.rows.length === 0) throw new Error(`Recovery case missing for ${eventId}`);
   const caseId = Number(caseResult.rows[0].id);
   if (await isRecoveryTerminal(pool, eventId)) return;
 
-  const existing = await pool.query(
-    `SELECT COUNT(*) FROM scheduled_actions
-     WHERE case_id = $1 AND desired_action = 'retry_with_backoff'`,
-    [caseId]
-  );
-  const attemptNumber = Number(existing.rows[0]?.count ?? 0) + 1;
+  const attemptNumber = await nextAttemptNumber(caseId);
   if (attemptNumber > MAX_SCHEDULED_ATTEMPTS) {
     const reason = `Maximum scheduled recovery attempts (${MAX_SCHEDULED_ATTEMPTS}) reached.`;
     await createHumanEscalation(pool, caseId, eventId, reason);
@@ -62,11 +66,8 @@ export async function processDueScheduledActions(limit = 10): Promise<void> {
   const due = await pool.query(
     `SELECT id
      FROM scheduled_actions
-     WHERE (
-       status = 'PENDING' AND run_at <= now()
-     ) OR (
-       status = 'RUNNING' AND claimed_at < now() - ($2 * interval '1 minute')
-     )
+     WHERE (status = 'PENDING' AND run_at <= now())
+        OR (status = 'RUNNING' AND claimed_at < now() - ($2 * interval '1 minute'))
      ORDER BY run_at ASC
      LIMIT $1`,
     [limit, STALE_CLAIM_MINUTES]
@@ -79,7 +80,7 @@ export async function processDueScheduledActions(limit = 10): Promise<void> {
        WHERE id = $1
          AND ((status = 'PENDING' AND run_at <= now())
            OR (status = 'RUNNING' AND claimed_at < now() - ($2 * interval '1 minute')))
-       RETURNING id, case_id, event_id, intervention_id, desired_action, schedule_key, attempt_count`,
+       RETURNING id, case_id, event_id, intervention_id, schedule_key, attempt_count`,
       [row.id, STALE_CLAIM_MINUTES]
     );
     if (claim.rows.length === 0) continue;
@@ -97,7 +98,7 @@ export async function processDueScheduledActions(limit = 10): Promise<void> {
       String(job.schedule_key)
     );
 
-    if (result.status === "executed" || result.status === "duplicate" || result.status === "blocked") {
+    if (result.status === "executed" || result.status === "blocked") {
       await pool.query(
         "UPDATE scheduled_actions SET status = $2, last_error = NULL, updated_at = now() WHERE id = $1",
         [job.id, result.status === "blocked" ? "CANCELLED" : "DONE"]
@@ -105,10 +106,24 @@ export async function processDueScheduledActions(limit = 10): Promise<void> {
       continue;
     }
 
+    if (result.status === "duplicate") {
+      // A duplicate means this exact attempt key was already claimed. Do not issue another external call.
+      // Leave the job terminal and surface it for audit rather than guessing whether a crashed claimant called Razorpay.
+      const reason = result.reason ?? "Scheduled action attempt was already claimed.";
+      await pool.query(
+        "UPDATE scheduled_actions SET status = 'FAILED', last_error = $2, updated_at = now() WHERE id = $1",
+        [job.id, reason]
+      );
+      await createHumanEscalation(pool, Number(job.case_id), String(job.event_id), `Ambiguous prior execution state: ${reason}`);
+      await logAuditEvent(String(job.event_id), "scheduled_retry_ambiguous_duplicate", { scheduleKey: job.schedule_key, reason });
+      continue;
+    }
+
     const transient = result.razorpayStatus === 429 || (result.razorpayStatus != null && result.razorpayStatus >= 500) || result.razorpayStatus == null;
-    if (!transient || Number(job.attempt_count) >= MAX_SCHEDULED_ATTEMPTS) {
+    const nextAttempt = await nextAttemptNumber(Number(job.case_id));
+    if (!transient || nextAttempt > MAX_SCHEDULED_ATTEMPTS) {
       const reason = transient
-        ? `Scheduled retry exhausted after ${job.attempt_count} worker attempts.`
+        ? `Scheduled retry exhausted after ${MAX_SCHEDULED_ATTEMPTS} execution attempts.`
         : `Scheduled retry failed with non-retryable Razorpay status ${result.razorpayStatus}.`;
       await pool.query(
         "UPDATE scheduled_actions SET status = 'FAILED', last_error = $2, updated_at = now() WHERE id = $1",
@@ -119,7 +134,6 @@ export async function processDueScheduledActions(limit = 10): Promise<void> {
       continue;
     }
 
-    const nextAttempt = Number(job.attempt_count) + 1;
     const delaySeconds = computeDelaySeconds(Number(job.case_id), nextAttempt, result.retryAfterSeconds);
     const nextKey = `${job.event_id}_retry_with_backoff_attempt_${nextAttempt}`;
     await pool.query(

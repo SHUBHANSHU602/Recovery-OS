@@ -5,85 +5,143 @@
 - ts-node failed to resolve entry file on Windows/Node 24 (MODULE_NOT_FOUND on a valid path); tsx hit a separate ESM resolution error on the same setup; switched Day-1 webhook receiver to plain CommonJS JS to unblock, deferred TypeScript to Day 4 when structured-output validation actually needs it.
 - Expected error_code to reflect the specific test-card scenario (payment_timed_out); got generic BAD_REQUEST_ERROR/payment_failed instead — test-mode manual Failure click doesn't preserve the card's intended error type.
 
-
 # Decisions Log
 
 ## Day 1
 - LLM provider: Anthropic Claude — matches Razorpay's own stack (Agent Studio built on Claude Agent SDK, NPCI agentic-payments pilot runs on Claude).
-- Language/runtime: Node.js — I/O-bound service (webhooks, DB, LLM calls) fits Node's async model; TypeScript deferred to Day 4 (see below).
-- TypeScript deferred for Day 1: ts-node and tsx both hit unresolved Windows/Node-24 module resolution errors on this machine. Day 1's webhook receiver is trivial and doesn't need type safety yet — switched to plain CommonJS JS to stay unblocked. Revisit TypeScript on Day 4 when structured LLM output validation actually needs it.
+- Language/runtime: Node.js — I/O-bound service (webhooks, DB, LLM calls) fits Node's async model; TypeScript deferred to Day 4.
+- TypeScript deferred for Day 1: ts-node and tsx both hit unresolved Windows/Node-24 module resolution errors on this machine. Day 1's webhook receiver is trivial and doesn't need type safety yet — switched to plain CommonJS JS to stay unblocked.
 - Orchestration: plain hand-rolled pipeline, not LangGraph — the loop is linear with one branch (escalation); a framework built for complex multi-agent graphs is unnecessary complexity here.
 - Memory/retrieval: no vector DB — diagnosis works off structured evidence (error codes, correlated failures, payment history), which is a SQL problem, not semantic search.
 - Deployment: Docker Compose, local — buildathon asks for a public repo + pitch video + architecture doc, not confirmed live hosting.
 
-
 ## Day 2
-- TypeScript brought in now (originally planned for Day 4) — user requested it early for the DB layer; switched from ts-node (broken on Day 1) to tsx, which works cleanly.
-- Schema: `events` table uses a SERIAL `id` as primary key + a separate UNIQUE `event_id` column, not event_id as PK directly — keeps internal identity independent of Razorpay's external ID scheme, useful if a second payment provider is ever added.
-- Dedup enforced at the database level via UNIQUE constraint + catching Postgres error code 23505, not via an application-level "check then insert" — avoids a race-condition window between check and insert.
-- Payload stored as JSONB (not fixed columns) — evidence-gathering/diagnosis field needs aren't fully known yet; JSONB preserves everything and stays queryable.
-- Moved DB credentials from hardcoded values in server.ts to .env (via dotenv) + .gitignore — server.ts will be in a public repo.
-
+- TypeScript brought in early for the DB layer; switched from ts-node to tsx.
+- Schema: `events` uses a surrogate internal primary key plus a separate UNIQUE external `event_id`.
+- Dedup enforced at the database level, not with a check-then-insert race.
+- Raw webhook payloads stored as JSONB to preserve source data while requirements evolve.
+- DB credentials moved to `.env` before public-repo use.
 
 ## Day 3
-- Evidence gathered per event: error code/description (from the event itself), customer failure history count, and correlated-failures-at-same-bank count within a 30-minute window — matches the three-signal design in the handoff doc.
-- Synthetic batch generator (recovery_batches table) creates labeled events with a known ground-truth cause, so Day 4 diagnosis accuracy becomes a measurable metric instead of a guess.
-- recovery_batches.event_id is a foreign key into events(event_id) — Postgres physically rejects an orphaned synthetic label, keeping ground-truth data always in sync with real event rows.
-
+- Evidence per event: error code/description, customer failure history count, and same-bank correlated failures in a 30-minute window.
+- Synthetic labeled batch created so diagnosis accuracy is measurable.
+- `recovery_batches.event_id` references `events(event_id)` so labels cannot orphan from source events.
 
 ## Day 4
-- LLM provider switched from Anthropic Claude to Google Gemini (gemini-3.6-flash) — practical constraint: Gemini key already available free, Anthropic API is paid. Original pitch angle ("matches Razorpay's Claude-based stack") no longer applies; architecture (evidence -> diagnosis -> verifier -> policy gate) is the actual differentiator.
-- Diagnosis structured output enforced via Gemini's forced function-calling (functionCallingConfig.mode: "ANY" + allowedFunctionNames) — same role as tool_choice, guarantees root_cause is always one of four enum values.
-- diagnose.ts and gatherEvidence.ts both export their core functions so diagnoseBatch.ts (and later scripts) reuse the same logic rather than duplicating it — avoids evidence-gathering implementations drifting apart.
-- Gemini free tier caps at 5 requests/minute for gemini-3.6-flash — added a 13s delay between diagnosis calls in batch runs. Fine for the real webhook loop (events arrive one at a time in practice), but means full batch evaluation (Day 10) and any live demo (Day 12) must use pre-run/cached results rather than running the whole batch on camera. Revisit paid tier before submission if budget allows.
-
-
+- LLM provider switched from Anthropic to Gemini due practical API access constraints at that stage; architecture remains provider-independent.
+- Diagnosis structured output enforced through tool/function calling.
+- Core functions exported and reused rather than duplicated across batch/single-event flows.
+- Batch calls rate-limited deliberately rather than hiding provider free-tier constraints.
 
 ## Day 5
-- Verifier (verify.ts) is pure deterministic logic, zero API calls -- enforces: systemic_bank_outage requires >=2 correlated failures; customer-specific causes (insufficient_funds/expired_card) are flagged if correlation is actually >=2 (looks systemic, not isolated); confidence must be in [0,1]. Anything failing an invariant is downgraded to ambiguous, not silently accepted.
-- diagnoseBatch.ts now stores verification.finalRootCause (post-verifier) in diagnoses table, not the raw LLM output -- makes the verifier's correction actually load-bearing, not decorative.
-- Known limitation, found via real evaluation: verifier checks evidence-consistency, not confidence-calibration. It won't catch a diagnosis that's internally consistent with evidence but still the wrong specific guess on a genuinely ambiguous case (observed: Groq's gpt-oss-120b confidently guessed insufficient_funds on an event Gemini had correctly called ambiguous). Documented as a known boundary of the current design, not silently fixed.
-
+- Verifier is deterministic, zero-API logic. It checks evidence consistency, not semantic confidence calibration.
+- Stored diagnosis is the verifier's final cause, making the verifier load-bearing rather than decorative.
+- A known boundary was recorded: a claim can be evidence-consistent yet still be a poor confident guess on genuinely thin evidence.
 
 ## Day 6
-- chooseAction.ts: LLM selects one action from a fixed 5-action menu (retry_now, retry_with_backoff, offer_alternate_payment_method, whatsapp_nudge, escalate_to_human) via forced function-calling -- same enum-constraint pattern as diagnosis, structurally cannot invent a new action.
-- policyGate.ts: pure deterministic logic, zero API calls. Enforces max automated retries (3) and max WhatsApp contacts/day (1) -- caps that override the LLM's chosen action regardless of confidence, forcing escalate_to_human when tripped.
-- interventions table stores both chosen_action (LLM's raw pick) and final_action (post-gate) -- same audit pattern as diagnoses.root_cause vs verifier's finalRootCause.
-- Known simplification: customerFailureCount and customerContactedInLast24h are hardcoded to 0/false in interveneOnBatch.ts, since no synthetic customer in batch_1 currently has repeat failures or contacts. Policy gate's blocking behavior is proven in isolation (testPolicyGate.ts, 4/4 expected outcomes) but not yet exercised against real batch data with repeat customers. To be addressed when batch_1 is expanded or during Day 9 hardening.
-
+- Action selection constrained to five approved actions via function calling.
+- Policy gate remains deterministic and can override the model regardless of confidence.
+- Interventions store both model choice and post-policy final action.
 
 ## Day 7
-- Added actions table (intervention_id FK, idempotency_key UNIQUE, status, response) and audit_log table (event_id FK, stage, detail JSONB) -- append-only record of every pipeline stage.
-- auditLog.ts: single logAuditEvent() function used by every stage (diagnosis, verification, intervention, policy_check, execution) -- one code path writes to the ledger, not scattered inserts.
-- execute.ts implements retry_with_backoff only for Day 7 (real Razorpay test-mode payment_links.create call); other action types log execution_not_implemented rather than silently no-op, honestly reflecting current scope.
-- Idempotency check happens before any Razorpay API call, backed by a DB-level UNIQUE constraint on idempotency_key -- not just an application-level check.
-
+- Added `actions` and `audit_log` as durable side-effect/audit records.
+- Centralized audit writes through one helper.
+- Idempotency enforced with a database UNIQUE key before external execution.
 
 ## Day 8
-- conversations table stores full message history as JSONB per event, status tracks active/resolved/escalated.
-- Conversational agent uses a tool-calling while-loop (not a single call) -- keeps resolving tool calls until the model responds with plain text, since a single customer message may need multiple tool calls before a reply makes sense.
-- System prompt is built per-conversation with known customer context (email, amount) injected directly -- the agent must never ask the customer for information the backend already has.
-- generatePaymentLink() reuses the exact idempotency pattern from Day 7 (stable key: eventId + action type, checked before any Razorpay call) -- applied proactively this time rather than repeating the Day 7 mistake.
-- actions.intervention_id made nullable -- conversational payment links aren't tied to a single automated intervention row, unlike Day 7's batch executions.
+- Conversations persist full message history as JSONB.
+- Conversational agent uses a tool-calling loop, not a one-shot response.
+- Known customer identity/amount are backend context, not values the LLM is allowed to redefine.
+- `actions.intervention_id` made nullable because conversational actions may not belong to one automated intervention row.
 
 ## Day 9
-- execute.ts now routes whatsapp_nudge and offer_alternate_payment_method into the conversational agent (Day 8) rather than treating them as unimplemented -- agent sends a templated opening message, then reasons freely for all follow-up turns. Opening message is deliberately templated (not LLM-generated) since it's a known, consistent trigger; the actual reasoning work is in how the agent responds to what the customer says back.
-- diagnoseBatch.ts's accuracy metric now recomputes from actual stored diagnoses each run, not just events processed in that specific run -- stays correct even when most/all events are skipped as already-diagnosed.
-
+- `whatsapp_nudge` and `offer_alternate_payment_method` enter the conversational path.
+- Opening message remains deterministic; language reasoning begins on actual customer replies.
+- Evaluation reads stored state rather than only work performed in the current process invocation.
 
 ## Day 10
-- Expanded batch_1 from 10 to 25 synthetic events for final evaluation: broader cause coverage, two independent systemic_bank_outage clusters (AXIS and KOTAK, different banks and time windows) to test correlation logic generalizes rather than fitting one hardcoded cluster, and a repeat-customer case (customer20, 3 failures) to exercise customerFailureCount.
-- runEvaluation.ts computes 4 metrics from real stored data: diagnosis accuracy, verifier intervention rate, recovery rate (proxy: successful action initiation, not confirmed customer payment completion -- test mode has no real customer to complete the loop), and false-escalation rate (escalating a genuinely ambiguous case is correct behavior, not counted as false).
+- Expanded evaluation data to broaden cause coverage and include multiple bank clusters + repeat customers.
+- Metrics initially included diagnosis accuracy, verifier interventions, action-initiation recovery proxy, and false escalation.
 
 ## Track 3 P0 hardening — 2026-09-02
-- The Track 3 review is now the correctness baseline: AI proposes; deterministic code verifies, gates, authorizes, executes, and accounts for money-adjacent actions.
-- Added `recovery_cases` as the business-outcome identity keyed by the original failed event. Action/API success is no longer treated as customer recovery; only a trusted `payment_link.paid` transition records `RECOVERED` and recovered amount.
-- Added a durable `recovery_jobs` state row and `processRecoveryCase()` orchestration so a verified `payment.failed` webhook can persist intent and drive evidence -> diagnosis -> verification -> action selection -> policy -> execution without manual batch-script choreography. Worker restart can pick up PENDING/FAILED jobs.
-- Webhook trust boundary changed to raw-body HMAC-SHA256 verification with timing-safe comparison before JSON parsing or persistence. Event-id dedupe remains database-backed.
-- Evidence is decision-time bounded. Customer history only includes older events; bank correlation is a lookback window ending at the current event. `evidenceCutoffAt` is stored on the recovery case/audit path.
-- Replaced hard-coded batch policy values with a Postgres-backed `PolicyContextLoader`: retry attempts, outbound contacts in the last 24h, terminal recovery state, and an explicit opt-out signal are loaded from trusted state.
-- All payment-link creation now goes through `ActionService`. The action row is claimed with `INSERT ... ON CONFLICT DO NOTHING RETURNING id` before the Razorpay API call, closing the prior concurrency race where two workers could both pass a SELECT-before-call check.
-- Conversational `generate_payment_link` no longer calls Razorpay directly; it requests intent through the same ActionService. Trusted amount/customer values are reloaded from the original event and are not accepted from LLM tool arguments.
-- Recovery OS opening messages are persisted as `assistant`/outbound messages; `runAgentTurn` is reserved for actual inbound customer text. Outbound contacts are recorded separately for policy caps.
-- Evaluation now separates execution reliability from business outcome and reports revenue at risk, confirmed recovered revenue, value recovery rate, transaction recovery rate, and unresolved amount.
-- `retry_with_backoff` remains a P1 semantic debt: the current executor still creates a link immediately rather than scheduling a delayed retry. This branch deliberately prioritizes the PDF's P0 completion checklist; real scheduling/backoff, 429 retry classification, stronger audit immutability, richer runtime schemas, and durable human-work-item lifecycle remain follow-up work.
+- **Correctness baseline:** AI proposes; deterministic code verifies, gates, authorizes, executes, and accounts for money-adjacent actions.
+- Added `recovery_cases` as the business-outcome identity keyed by original failed event.
+- Action/API success no longer equals recovery. Trusted `payment_link.paid` is required to record recovered money.
+- Added durable `recovery_jobs` so the webhook can hand off to a restartable pipeline.
+- Webhook trust boundary moved to raw-body HMAC-SHA256 validation before parsing/persistence.
+- Evidence is decision-time bounded; future events may not influence earlier decisions.
+- Policy inputs come from persisted state instead of hard-coded placeholders.
+- All payment-link creation uses one `ActionService` and reloads trusted amount/customer identity from the original event.
+- Action rows are claimed before Razorpay calls to close the concurrent SELECT-before-call race.
+- Conversational payment-link tools use the same ActionService and policy boundary.
+- Opening recovery text is `assistant`/outbound; `user` is reserved for actual customer input.
+- Evaluation separates execution reliability from confirmed money recovery.
+- At P0 completion, delayed retry scheduling, 429 handling, DB-level audit protection, durable escalation work items, and reproducibility were intentionally left for P1 rather than overstated.
+
+## Track 3 P1 hardening — 2026-09-02
+
+### Webhook inbox semantics
+- **Decision:** treat webhook transport receipt and business processing as separate states.
+- Added `webhook_deliveries` with `RECEIVED`, `PROCESSING`, `PROCESSED`, and `FAILED`.
+- A duplicate Razorpay event ID is only considered fully done when its delivery state is `PROCESSED`; failed or stale work may be reclaimed.
+- Rationale: deduplicating at receipt time is insufficient because downstream processing can fail after persistence.
+
+### PostgreSQL transactions must use one checked-out client
+- **Decision:** any multi-statement transaction uses `pool.connect()` and a dedicated client for BEGIN/COMMIT/ROLLBACK.
+- Rationale: `pool.query()` calls may use different physical connections, so transaction boundaries cannot safely be expressed with independent pool-level calls.
+
+### Idempotency belongs to a logical attempt
+- **Decision:** key payment-link side effects by recovery event + action + logical attempt number, not only by action name.
+- Example: `event_retry_with_backoff_attempt_1`, `...attempt_2`, `...attempt_3`.
+- Rationale: action-level identity blocked legitimate later retries; row-ID identity allowed duplicates. Attempt identity preserves both dedupe and retry semantics.
+
+### Fail closed on ambiguous crash recovery
+- **Decision:** if an exact action-attempt key already exists after a worker crash, do not blindly repeat the external side effect.
+- Instead, surface the state as ambiguous and create a human escalation.
+- Rationale: without a confirmed provider-side exactly-once primitive for this call, replaying an uncertain money-adjacent external action is less safe than escalating.
+
+### Backoff must be persisted, not slept in-process
+- **Decision:** `retry_with_backoff` creates `scheduled_actions` with `run_at` and is consumed by a polling worker.
+- Rationale: in-memory timers/sleeps disappear on restart and hold execution resources unnecessarily.
+- Transient retry policy: honor `Retry-After` when supplied; otherwise bounded exponential backoff + deterministic jitter; retry 429, 5xx, and network-style failures; cap automated attempts at three.
+
+### Original payment success is terminal but not “recovered by Recovery OS”
+- **Decision:** trusted `payment.captured` for the original payment moves an open recovery case to `STOPPED`, not `RECOVERED`.
+- Rationale: the customer has paid and outreach must stop, but attributing that money to a Recovery OS Payment Link would overclaim recovered revenue.
+
+### Action selection gets contextual inputs; policy still owns limits
+- **Decision:** action selection receives root cause, confidence, amount at risk, prior customer failures, same-bank evidence, current retry/contact state, and prior recovery outcomes.
+- Rationale: a root-cause → action mapping was too close to a switch statement and did not justify an LLM.
+- The deterministic policy gate remains authoritative and can reject the LLM recommendation.
+
+### Evaluation labels are causal, not omniscient
+- **Decision:** early observations in an emerging bank cluster are labeled `ambiguous` until enough *earlier* corroborating failures exist.
+- Added same-error-text cases where only contextual history changes the expected diagnosis.
+- Rationale: ground truth for a decision system must reflect what was knowable at decision time, not what became obvious later.
+
+### Evaluation metrics invalidate stale headlines when the methodology changes
+- **Decision:** remove old 96% / 67.6% README headlines after changing causal labels and recovered-money accounting.
+- New numbers must come from rerunning the current evaluator on the current schema/data.
+- Rationale: preserving old numbers after changing the definition would be misleading.
+
+### Human escalation is a work item, not just a log line
+- **Decision:** create `human_escalations` with one durable item per recovery case.
+- Policy, scheduler, executor, and agent escalation paths all converge on this record.
+- Rationale: an escalation that nobody can own/resolve is not an operational workflow.
+
+### Audit log terminology and enforcement
+- **Decision:** describe the audit trail as **database-enforced append-only**, not cryptographically immutable.
+- Added a PostgreSQL trigger rejecting UPDATE and DELETE on `audit_log`.
+- Rationale: this materially strengthens tamper resistance while keeping the wording precise; DB admins can still alter schema/disable triggers, so “immutable ledger” remains too strong.
+
+### Repository structure and reproducibility
+- **Decision:** flatten the application to the repository root and use standard `README.md`.
+- Remove tracked `node_modules`; retain `.gitignore` protections.
+- Restore a valid `package.json` and Node-oriented `tsconfig.json`.
+- Add `.env.example`, `docker-compose.yml`, ordered SQL migrations, and `src/db/migrate.ts`.
+- Rationale: a judge should be able to clone, install, start Postgres, migrate, type-check, and run without reconstructing hidden local state.
+
+### Runtime verification claims
+- **Decision:** do not claim P1 runtime/E2E success from the GitHub connector session.
+- Static cross-file review and repository mutations are verified; local Postgres, Razorpay Test Mode, and Groq execution still need to be run in the user's environment.
+- The repository now exposes explicit commands for that verification so results can be recorded after execution rather than inferred.

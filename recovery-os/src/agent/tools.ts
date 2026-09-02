@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { Pool } from "pg";
 import { requestPaymentLink } from "../execution/actionService";
-import { ensureRecoveryCase, ensureTrack3Schema, setRecoveryState } from "../recovery/recoveryStore";
+import { createHumanEscalation, ensureRecoveryCase, ensureTrack3Schema } from "../recovery/recoveryStore";
 import { logAuditEvent } from "../ledger/auditLog";
 
 const pool = new Pool();
@@ -19,7 +19,7 @@ export async function checkCustomerRiskFlags(customerEmail: string): Promise<{ f
 
 // The LLM requests intent only. Trusted amount/customer identity are loaded by ActionService.
 export async function generatePaymentLink(eventId: string, _amount: number): Promise<{ shortUrl: string | null; status: string; reason?: string }> {
-  const result = await requestPaymentLink(eventId, "retry_now", null);
+  const result = await requestPaymentLink(eventId, "retry_now", null, `${eventId}_retry_now_agent_attempt_1`);
   return {
     shortUrl: result.shortUrl ?? null,
     status: result.status,
@@ -30,11 +30,11 @@ export async function generatePaymentLink(eventId: string, _amount: number): Pro
 export async function escalateToHuman(eventId: string, reason: string): Promise<{ escalated: boolean }> {
   await ensureTrack3Schema(pool);
   const caseId = await ensureRecoveryCase(pool, eventId);
-  if (caseId) await setRecoveryState(pool, caseId, "ESCALATED", { terminalReason: reason });
+  if (caseId) await createHumanEscalation(pool, caseId, eventId, reason);
   await pool.query(
     "UPDATE conversations SET status = 'escalated', updated_at = now() WHERE event_id = $1",
     [eventId]
   );
-  await logAuditEvent(eventId, "human_escalation", { reason });
+  await logAuditEvent(eventId, "human_escalation", { reason, workItemCreated: Boolean(caseId) });
   return { escalated: true };
 }

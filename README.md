@@ -1,168 +1,242 @@
-
-
-Readme · MD
 # Recovery OS
- 
-**A single root-cause reasoning layer for failed payments** — built for Razorpay's AI Buildathon (Track 3: AI Revenue Recovery).
- 
-An LLM diagnoses *why* a payment actually failed, a deterministic verifier checks that diagnosis against real evidence, the LLM chooses a bounded recovery action from a fixed menu, a deterministic policy gate enforces hard limits, and every step is logged to an immutable audit ledger — so any recovered rupee traces back to the exact reasoning that recovered it.
- 
----
- 
-## Why this project, not a chatbot wrapper
- 
-Razorpay's own Agent Studio already ships prebuilt agents (Subscription Recovery, Abandoned Cart, Dispute Responder, etc.), built on the Claude Agent SDK. A project that looks like a thin wrapper around their own webhook reads as derivative to the people who'd be judging it.
- 
-Recovery OS instead asks a narrower, harder question: **what does it take to make an LLM's judgment trustworthy enough to sit upstream of real money movement?** The answer isn't "trust the model" — it's a specific architecture:
- 
-> **AI does the judgment-heavy, ambiguous, language-native work. Deterministic code does the liability-bearing, must-never-be-wrong work.**
- 
-That single rule is applied at every layer of this system, three times over — and it's the actual thing being demonstrated here, not the LLM calls themselves.
- 
----
- 
-## ⭐ Signal-at-a-glance
- 
-If you only read one section, read this one.
- 
-- **A safety layer that's *proven*, not claimed.** The verifier is deliberately fed a wrong diagnosis (`systemic_bank_outage` claimed with zero corroborating evidence) and demonstrably catches it — 4/4 adversarial test cases pass, reproducible via `testVerifier.ts`.
-- **The money-movement layer is provably idempotent.** A real duplicate-payment-link bug was found *during this build* (idempotency key bound to a database row ID instead of stable business identity), caused 5 real duplicate links in test mode, and was root-caused and fixed same-day. Documented in full in `DEBUG-LOG.md` — not hidden.
-- **96% diagnosis accuracy on a 25-event evaluation batch**, including correctly distinguishing two *independent* systemic bank-outage clusters (different banks, different time windows) from isolated customer-specific failures — using multi-signal reasoning, not an error-code lookup table.
-- **The one part of the system that genuinely can't be done with rules — a real, working, tool-using conversational agent** — is implemented, not deferred. It reasons over free-text customer replies and calls deterministic tools (`generate_payment_link`, `check_customer_risk_flags`, `escalate_to_human`) rather than hallucinating actions.
-- **Every metric reported is honestly caveated.** Recovery rate is explicitly labeled as "successful initiation," not "confirmed customer payment," because test mode has no real customer to complete the loop. Rate-limit failures are reported as external constraints, not swept into a misleadingly high success number.
-- **A real, dated debugging trail** — nine days of genuine bugs, root-caused and fixed, documented as they happened in `DEBUG-LOG.md`. The buildathon's own evaluation criteria flags a project that "ran perfectly on the first try" as suspicious; this one didn't, and says so.
----
- 
-## Architecture: the core loop
- 
+
+**Closed-loop AI revenue recovery for failed payments** — built for Razorpay's AI Buildathon, Track 3.
+
+Recovery OS detects failed payments, gathers causal evidence, uses an LLM to diagnose the likely cause, verifies that diagnosis deterministically, chooses a bounded intervention, applies hard policy limits, executes through a centralized action service, and records confirmed recovered revenue only after a trusted Razorpay outcome webhook.
+
+> **AI handles ambiguity and language. Deterministic code handles trust, policy, side effects, idempotency, and money accounting.**
+
+## Core loop
+
+```text
+trusted payment.failed webhook
+        ↓
+webhook inbox: RECEIVED → PROCESSING → PROCESSED / FAILED
+        ↓
+durable recovery case + recovery job
+        ↓
+causal evidence snapshot
+        ↓
+LLM diagnosis
+        ↓
+deterministic verifier
+        ↓
+LLM intervention selection from a fixed menu
+        ↓
+deterministic policy gate
+        ↓
+ActionService
+   ├─ retry_now
+   ├─ scheduled retry_with_backoff
+   ├─ simulated conversational outreach
+   └─ durable human escalation
+        ↓
+Razorpay Test Mode Payment Link
+        ↓
+payment_link.paid webhook
+        ↓
+RECOVERED + recovered_amount
 ```
-payment.failed webhook
-  → evidence gathering            (deterministic)
-  → AI diagnosis                  (LLM: root cause + rationale + confidence)
-  → deterministic verifier        (checks diagnosis against evidence invariants)
-  → AI chooses recovery action    (LLM: constrained to a fixed menu)
-  → policy gate                   (deterministic: caps, cool-off, escalation rules)
-  → [if conversational]  tool-using multi-turn agent
-  → execution                     (deterministic: real Razorpay test-API calls, idempotent)
-  → audit ledger                  (append-only log of every stage above)
+
+A later `payment.captured` for the original payment is also treated as a terminal signal so Recovery OS stops asking a customer to pay again.
+
+## What makes the design different
+
+### 1. Revenue recovery is measured from confirmed outcomes
+
+Creating a Payment Link is **execution success**, not revenue recovery.
+
+Recovery OS keeps one `recovery_cases` row per original failed transaction and reports:
+
+- revenue at risk
+- confirmed recovered revenue
+- value recovery rate
+- transaction recovery rate
+- unresolved amount
+- recovery by strategy
+
+Only a trusted `payment_link.paid` webhook can move an open case to `RECOVERED` and increase `recovered_amount`.
+
+### 2. Webhooks are authenticated and retry-safe
+
+The Razorpay webhook route:
+
+1. preserves the raw request body,
+2. verifies `X-Razorpay-Signature` using HMAC-SHA256,
+3. stores the event and a durable webhook-delivery state,
+4. separates **received** from **fully processed**, and
+5. allows failed/stale processing to be reclaimed safely.
+
+This avoids the common bug where an event ID is deduplicated before downstream processing succeeds and a Razorpay retry is then incorrectly discarded as "already processed".
+
+### 3. Evidence is decision-time safe
+
+Diagnosis only sees evidence that existed **before the failed payment being diagnosed**.
+
+Customer history and same-bank correlation queries end at the event timestamp. Future failures cannot leak backward into an earlier decision.
+
+### 4. AI is advisory; policy remains authoritative
+
+The diagnosis model is constrained to:
+
+- `insufficient_funds`
+- `expired_card`
+- `systemic_bank_outage`
+- `ambiguous`
+
+A deterministic verifier independently checks whether the evidence supports the model's claim.
+
+The intervention model can only select:
+
+- `retry_now`
+- `retry_with_backoff`
+- `offer_alternate_payment_method`
+- `whatsapp_nudge`
+- `escalate_to_human`
+
+It receives richer context than just the root cause: value at risk, prior failed payments, bank-correlation evidence, retry/contact state, and prior recovery outcomes. The deterministic policy gate still has final authority.
+
+### 5. Backoff is real persisted work
+
+`retry_with_backoff` no longer means "create a link immediately." It creates a durable `scheduled_actions` row with a future `run_at`.
+
+The worker:
+
+- claims due work atomically,
+- uses per-attempt idempotency identities,
+- honors `Retry-After` when available,
+- otherwise uses bounded exponential backoff plus deterministic jitter,
+- retries transient `429` / `5xx` failures,
+- stops at the configured retry cap, and
+- creates a durable human-escalation item when automated recovery is exhausted or unsafe.
+
+### 6. Idempotency is per execution attempt
+
+The original implementation discovered a real test-mode duplicate-link bug because the idempotency key was tied to a database row ID instead of stable work identity.
+
+The hardened design separates:
+
+```text
+recovery strategy
+        ↓
+logical attempt #1 / #2 / #3
+        ↓
+unique idempotency key for that exact attempt
 ```
- 
-### Why each stage is deterministic or LLM-driven
- 
-| Stage | Driven by | Why |
-|---|---|---|
-| Evidence gathering | Deterministic | Idempotent webhook ingestion, SQL queries for customer history + correlated failures. No judgment needed — just correct retrieval. |
-| Diagnosis | **LLM** | Distinguishing "insufficient funds" from "systemic bank outage" requires reasoning over *combinations* of ambiguous signals — a lookup table can't do this. |
-| Verification | Deterministic | Re-checks the LLM's claim against real evidence with plain `if` logic. Zero API calls. Auditable line-by-line by a human. |
-| Action selection | **LLM**, but menu-constrained | Choosing the right intervention given root cause + customer history is a judgment call — but the LLM can only pick from 5 pre-approved actions, never invent a sixth. |
-| Policy gate | Deterministic | Hard caps (max retries, contact limits) that override the LLM's choice regardless of confidence. Money-adjacent decisions never get a purely automated final say. |
-| Conversational recovery | **LLM**, tool-calling | Free-text customer replies ("can I pay a different way instead?") genuinely can't be handled by a decision tree — this is the one stage where no deterministic alternative exists. |
-| Execution | Deterministic | Real Razorpay API calls, checked against a database-enforced idempotency key *before* any call is made. |
- 
----
- 
-## Feature highlights
- 
-### 🧠 Multi-signal diagnosis, not error-code matching
-The diagnosis LLM reasons over three signals together: the error code itself, this customer's prior failure history, and how many *other* customers failed at the same bank in the same time window. That last signal is what separates "one customer's card expired" from "this bank is having an outage right now" — a pattern that requires reasoning across events, not reading one event in isolation.
- 
-- Verified against **two independent, real correlation clusters** in the evaluation batch (different banks, different times) — the logic generalizes, it doesn't just fit the one cluster it was built around.
-### 🛡️ A verifier that actually verifies
-`verify.ts` contains zero API calls. It enforces explicit invariants:
-- A `systemic_bank_outage` claim requires ≥2 real correlated failures — or it's downgraded to `ambiguous`.
-- A customer-specific claim (`insufficient_funds`, `expired_card`) is flagged if the correlation pattern actually looks systemic.
-- Malformed confidence values are rejected outright.
-**Proof, not assertion:** `testVerifier.ts` deliberately constructs a diagnosis that lies about its own evidence, and the verifier catches it every time.
- 
-### 🚧 A policy gate with real teeth
-`policyGate.ts` enforces hard limits — max automated retries, max customer contacts per day — that override the LLM's chosen action regardless of how confident it was. Proven via `testPolicyGate.ts`: an over-limit action is blocked and force-escalated to a human, every time.
- 
-### 💳 Idempotent by construction, not by hope
-Every real money-moving action is checked against a database-enforced unique idempotency key *before* any external API call is made. This was tested adversarially — running the same batch twice — and confirmed to block all duplicate executions on the second pass.
- 
-> **This wasn't true on the first attempt.** An earlier version of this system keyed idempotency to a database row ID rather than stable business identity, and a duplicate-row bug elsewhere in the pipeline caused 5 real duplicate payment links in test mode. Full root-cause and fix documented in `DEBUG-LOG.md` — included deliberately, because catching and fixing this class of bug *is* the demonstration, not a footnote.
- 
-### 💬 A genuine tool-using conversational agent
-Not a single structured call — a real multi-turn loop. The agent:
-- Knows the customer's context (email, amount) without needing to ask for it
-- Calls `check_customer_risk_flags` when the customer asks about their account status
-- Calls `generate_payment_link` when the customer wants to pay a different way
-- Calls `escalate_to_human` when it should stop guessing
-Every tool the agent can invoke is still deterministic underneath — the agent proposes, code executes. Same pattern as every other stage, applied to free-text conversation.
- 
-### 📊 An evaluation harness with a real answer key
-A synthetic batch generator creates labeled events with **known ground-truth causes**, including deliberately ambiguous and adversarial cases — so "diagnosis accuracy" is a measured number, not a vibe. Final batch: 25 events, 4 cause categories, 2 independent outage clusters, 1 repeat-customer case.
- 
-### 📜 An audit ledger that's actually queryable
-Every stage — diagnosis, verification, intervention, policy check, execution — writes to a single append-only `audit_log` table. Pull one event's full reasoning trail with one query:
+
+That blocks concurrent duplicate execution of one attempt without accidentally blocking a legitimate later retry attempt.
+
+If a previous exact attempt is found in an ambiguous `pending` state after a crash, Recovery OS fails closed and escalates rather than blindly issuing another money-adjacent external call.
+
+### 7. Conversation tools use the same trust boundary
+
+The conversational agent cannot directly choose trusted identity or amount values and cannot bypass policy.
+
+Its `generate_payment_link` tool calls the same `ActionService` used by the automated path. Trusted customer/amount data is reloaded from the stored payment event immediately before execution.
+
+Outbound Recovery OS messages are stored as `assistant` messages; only real customer replies are stored as `user` messages.
+
+### 8. Human escalation is durable
+
+Escalation is not just an audit string. Recovery OS creates a `human_escalations` work item tied to the recovery case, with lifecycle state that can later be resolved by an operator flow.
+
+### 9. Audit records have a database append-only guard
+
+Every decision stage writes to `audit_log`.
+
+A PostgreSQL trigger rejects `UPDATE` and `DELETE` against that table, giving the application a database-enforced append-only audit trail.
+
 ```sql
-SELECT stage, detail, created_at FROM audit_log WHERE event_id = '...' ORDER BY created_at;
+SELECT stage, detail, created_at
+FROM audit_log
+WHERE event_id = '...'
+ORDER BY created_at;
 ```
- 
----
- 
-## Evaluation results (25-event batch)
- 
-| Metric | Result | Note |
-|---|---|---|
-| Diagnosis accuracy | **24/25 (96%)** | Includes both independent outage clusters correctly identified |
-| Verifier — adversarial proof | **4/4** | Deliberately-wrong diagnoses caught every time (`testVerifier.ts`) |
-| Verifier — real-batch interventions | 0/25 | No corrections needed; diagnoses on this batch were already evidence-consistent |
-| Recovery rate (successful initiation) | **23/34 (67.6%)** | See caveat below |
-| False-escalation rate | **0%** | Every escalation was a genuinely ambiguous case, never a confident one |
- 
-**Honesty notes, stated plainly rather than buried:**
-- "Recovery rate" measures the system's own success at *initiating* an action (a real payment link created, a real conversation started) — not a confirmed customer payment. Test mode has no real customer to complete that final step.
-- 6 of the 11 non-successful actions failed due to genuine Razorpay test-mode rate limiting under real API load — not a logic error in diagnosis or decision-making. The system decided correctly in all 25 cases; execution throughput under external API constraints is a separate, honestly-reported number.
-- The policy gate's retry cap is proven correct via an isolated adversarial test, but wasn't exercised by real batch data in this evaluation run (the repeat-customer case happened to receive non-retry action types). Stated here rather than implied as fully end-to-end tested.
----
- 
-## What's built vs. designed-for
- 
-**Built and proven, end to end:**
-- Idempotent webhook ingestion with deduplication
-- Multi-signal evidence gathering (error code, customer history, correlated failures)
-- LLM diagnosis with structured, schema-constrained output
-- Deterministic verifier with adversarial proof
-- LLM action selection constrained to a fixed menu
-- Deterministic policy gate with adversarial proof
-- Real, idempotent execution against Razorpay's test API (`retry_with_backoff`)
-- A genuine multi-turn, tool-using conversational agent, wired as a real execution path
-- A complete, queryable audit trail per event
-- A labeled synthetic evaluation harness with real metrics
-**Designed for, not fully built:**
-- Automated execution is implemented for `retry_with_backoff`; `offer_alternate_payment_method` and `whatsapp_nudge` route into the conversational agent rather than a separate automated path
-- A second leak type (abandoned checkouts, overdue invoices) — explicitly scoped out from the start to protect the core loop
-- A richer dashboard beyond a minimal audit-log query — deliberately deprioritized as scope creep for a linear pipeline
----
- 
-## Tech stack, and why
- 
-| Choice | Reason |
+
+## Evaluation design
+
+The synthetic batch contains both clear controls and deliberately context-dependent cases.
+
+Several events now use the **same** outward signal:
+
+```text
+GATEWAY_ERROR
+"Payment could not be processed"
+```
+
+An isolated occurrence is labeled `ambiguous`. Later occurrences at the same bank become `systemic_bank_outage` only after enough earlier same-bank failures actually exist in the causal evidence window.
+
+This makes an error-code lookup table insufficient and prevents future-information leakage from inflating diagnosis accuracy.
+
+The evaluator reports diagnosis accuracy, verifier interventions, confirmed recovered revenue, transaction/value recovery, execution reliability, false escalation rate, recovery by strategy, and durable human-escalation count.
+
+Because the evaluation labels and recovery accounting were hardened, **old headline numbers such as 96% diagnosis accuracy and 67.6% "recovery" are intentionally not carried forward**. Run the current evaluator against the current schema/data before publishing new metrics.
+
+## Local setup
+
+```bash
+git clone https://github.com/SHUBHANSHU602/Recovery-OS.git
+cd Recovery-OS
+
+cp .env.example .env
+
+docker compose up -d
+npm ci
+npm run db:migrate
+npm run typecheck
+npm run test:core
+npm start
+```
+
+Fill these values in `.env` before exercising external integrations:
+
+```env
+RAZORPAY_KEY_ID=
+RAZORPAY_KEY_SECRET=
+RAZORPAY_WEBHOOK_SECRET=
+GROQ_API_KEY=
+```
+
+Run the evaluation with:
+
+```bash
+npm run evaluate
+```
+
+## Tech stack
+
+| Choice | Why |
 |---|---|
-| Node.js + TypeScript | I/O-bound service (webhooks, DB, LLM calls) fits Node's async model; TypeScript catches malformed structured output at the type boundary before it corrupts the audit ledger |
-| Groq (`openai/gpt-oss-120b`) | Practical constraint — free tier available and sufficiently capable; the diagnosis/action interfaces are provider-agnostic by design (proven by successfully swapping providers mid-build with zero downstream changes) |
-| Plain hand-rolled pipeline, not LangGraph | The loop is linear with one branch (escalation) — a framework built for complex multi-agent graphs is unneeded complexity here, and a hand-rolled version is easier to explain to a judge line by line |
-| Postgres, JSONB for raw payloads | Diagnosis works off structured evidence — a SQL problem, not semantic search; JSONB preserves full payloads without pre-committing to a rigid schema before requirements were known |
-| No vector DB / RAG | Nothing in this system needs semantic retrieval over unstructured text |
-| Docker Compose, local | No confirmed requirement for live cloud hosting in the buildathon's own submission criteria |
- 
-Full reasoning for every decision, including several that were reversed mid-build with stated reasons, is in `DECISIONS.md`.
- 
----
- 
-## The debugging trail
- 
-Nine days of real bugs, root-caused and fixed, documented as they happened — not reconstructed afterward. Highlights:
- 
-- **A duplicate-payment-link bug**, caused by an idempotency key bound to a database row ID instead of stable business identity — the single most important lesson in the codebase, and the kind of mistake that's genuinely expensive in a real production fintech system.
-- **Three separate LLM provider issues** (Gemini free-tier daily cap, a billing/project mismatch, Groq deprecating its own recommended model mid-build) — each diagnosed and resolved without derailing the schedule, and without the diagnosis/action interfaces needing to change underneath.
-- **A synthetic evaluation bug** (near-identical timestamps producing false-positive correlation signals) — caught by questioning suspicious-looking output rather than accepting a clean-looking run at face value.
-Full log: `DEBUG-LOG.md`.
- 
----
- 
-## Design thesis, stated as opinion
- 
-Agent Studio's public product page lists Subscription Recovery and Abandoned Cart as separate agents. This project builds a single root-cause reasoning layer instead, on the belief that unifying diagnosis *before* deciding on an action produces more defensible, more auditable decisions than parallel single-purpose agents each guessing independently. That's a claim about this build and its reasoning — not an assertion about Razorpay's internal architecture, which can't be verified from outside.
- 
+| Node.js + TypeScript | Good fit for webhook/API/DB-heavy I/O with explicit type boundaries |
+| PostgreSQL | Recovery state, policy context, evidence correlation, durable jobs, and auditability are relational problems |
+| Groq / `openai/gpt-oss-120b` | Structured diagnosis and intervention reasoning behind provider-independent interfaces |
+| Razorpay Test Mode | Real Payment Link API execution and trusted outcome webhooks without moving production money |
+| Plain orchestration | The core flow is understandable enough to audit without adding a graph framework |
+| No vector DB / RAG | The evidence is structured payment state, not semantic document retrieval |
+
+## Repository map
+
+```text
+src/
+  ingestion/     trusted webhook boundary
+  evidence/      causal evidence collection + synthetic batch
+  diagnosis/     constrained LLM diagnosis
+  verifier/      deterministic evidence invariants
+  policy/        intervention choice + deterministic limits
+  execution/     ActionService + delayed scheduler
+  recovery/      case/job state machine
+  agent/         tool-using conversation flow
+  evaluation/    business + model metrics
+  ledger/        audit logging
+  db/            migration runner
+
+sql/              reproducible schema
+DEBUG.md          genuine bugs, symptoms, root causes, fixes
+DECISION.md       architecture decisions and trade-offs
+```
+
+## Engineering record
+
+The project deliberately keeps the debugging trail rather than presenting a fake "everything worked first try" story. `DEBUG.md` records genuine failures and their fixes, including the duplicate Payment Link bug, causal-evidence leakage, webhook-processing idempotency, retry-attempt identity, and transaction/pool mistakes found during hardening.
+
+`DECISION.md` records the architectural decisions and trade-offs behind the current design.

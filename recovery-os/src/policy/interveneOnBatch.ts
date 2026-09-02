@@ -2,17 +2,18 @@ import "dotenv/config";
 import { Pool } from "pg";
 import { chooseAction } from "./chooseAction";
 import { applyPolicyGate } from "./policyGate";
+import { loadPolicyContext } from "./policyContext";
 import { logAuditEvent } from "../ledger/auditLog";
 
 const pool = new Pool();
 
-async function interveneOnBatch(batchName: string) {
-  
-
+export async function interveneOnBatch(batchName: string) {
   const diagnosesResult = await pool.query(
-    `SELECT d.id AS diagnosis_id, d.event_id, d.root_cause, d.confidence
+    `SELECT d.id AS diagnosis_id, d.event_id, d.root_cause, d.confidence,
+            e.payload->'payload'->'payment'->'entity'->>'email' AS customer_email
      FROM diagnoses d
      JOIN recovery_batches rb ON rb.event_id = d.event_id
+     JOIN events e ON e.event_id = d.event_id
      WHERE rb.batch_name = $1`,
     [batchName]
   );
@@ -20,16 +21,19 @@ async function interveneOnBatch(batchName: string) {
   for (const row of diagnosesResult.rows) {
     const already = await pool.query("SELECT id FROM interventions WHERE diagnosis_id = $1", [row.diagnosis_id]);
     if (already.rows.length > 0) {
-    console.log(`Skipping ${row.event_id} — already has an intervention.`);
-    continue;
+      console.log(`Skipping ${row.event_id} — already has an intervention.`);
+      continue;
     }
-    const customerFailureCount = 0;
-    const customerContactedInLast24h = false;
+
+    const policyContext = await loadPolicyContext(pool, {
+      eventId: row.event_id,
+      customerEmail: row.customer_email ?? "",
+    });
 
     const intervention = await chooseAction({
       rootCause: row.root_cause,
       confidence: parseFloat(row.confidence),
-      customerFailureCount,
+      customerFailureCount: policyContext.automatedRetryCount,
     });
 
     await logAuditEvent(row.event_id, "intervention_chosen", {
@@ -39,11 +43,11 @@ async function interveneOnBatch(batchName: string) {
 
     const policyOutcome = applyPolicyGate({
       chosenAction: intervention.chosen_action,
-      customerFailureCount,
-      customerContactedInLast24h,
+      ...policyContext,
     });
 
     await logAuditEvent(row.event_id, "policy_check", {
+      policyContext,
       result: policyOutcome.result,
       reason: policyOutcome.reason,
       finalAction: policyOutcome.finalAction,
@@ -60,9 +64,11 @@ async function interveneOnBatch(batchName: string) {
   }
 }
 
-interveneOnBatch("batch_1")
-  .catch((err) => {
-    console.error("Intervention failed:", err);
-    process.exitCode = 1;
-  })
-  .finally(() => pool.end());
+if (require.main === module) {
+  interveneOnBatch("batch_1")
+    .catch((err) => {
+      console.error("Intervention failed:", err);
+      process.exitCode = 1;
+    })
+    .finally(() => pool.end());
+}

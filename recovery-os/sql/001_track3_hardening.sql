@@ -1,6 +1,9 @@
 BEGIN;
 
 ALTER TABLE actions
+  ALTER COLUMN intervention_id DROP NOT NULL;
+
+ALTER TABLE actions
   ADD COLUMN IF NOT EXISTS event_id TEXT REFERENCES events(event_id),
   ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();
 

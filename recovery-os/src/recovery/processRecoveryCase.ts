@@ -70,14 +70,14 @@ export async function processRecoveryCase(eventId: string): Promise<void> {
       const chosen = await chooseAction({
         rootCause: diagnosis.root_cause,
         confidence: Number(diagnosis.confidence),
-        customerFailureCount: policyContext.automatedRetryCount,
+        customerFailureCount: evidence.customerFailureCount,
       });
       await setRecoveryState(pool, caseId, "ACTION_CHOSEN", { strategy: chosen.chosen_action });
       const policy = applyPolicyGate({ chosenAction: chosen.chosen_action, ...policyContext });
       await setRecoveryState(pool, caseId, policy.result === "APPROVED" ? "POLICY_APPROVED" : "POLICY_BLOCKED", {
         terminalReason: policy.result === "APPROVED" ? undefined : policy.reason,
       });
-      await logAuditEvent(eventId, "policy_check", { chosen, policyContext, policy });
+      await logAuditEvent(eventId, "policy_check", { chosen, policyContext, policy, customerFailureCount: evidence.customerFailureCount });
       interventionRow = await pool.query(
         `INSERT INTO interventions (diagnosis_id, chosen_action, reasoning, policy_check_result, final_action)
          VALUES ($1, $2, $3, $4, $5) RETURNING id, final_action`,

@@ -10,6 +10,23 @@ import { logAuditEvent } from "../ledger/auditLog";
 const app = express();
 const pool = new Pool();
 
+function dispatchStoredEvent(eventId: string, eventType: string, body: any) {
+  if (eventType === "payment.failed") {
+    void processRecoveryEvent(eventId).catch(async (err: any) => {
+      console.error(`Recovery pipeline failed for ${eventId}:`, err.message);
+      try {
+        await logAuditEvent(eventId, "pipeline_error", { error: err.message });
+      } catch (auditErr) {
+        console.error("Could not write pipeline_error audit record:", auditErr);
+      }
+    });
+  } else if (eventType === "payment_link.paid" || eventType === "payment.captured") {
+    void recordRecoveryFromWebhook(eventId, body).catch((err: any) => {
+      console.error(`Recovery confirmation failed for ${eventId}:`, err.message);
+    });
+  }
+}
+
 app.post("/webhooks/razorpay", express.raw({ type: "application/json" }), async (req: Request, res: Response) => {
   const eventId = req.headers["x-razorpay-event-id"] as string | undefined;
   const signature = req.headers["x-razorpay-signature"] as string | undefined;
@@ -44,31 +61,22 @@ app.post("/webhooks/razorpay", express.raw({ type: "application/json" }), async 
   }
 
   const eventType = body.event as string;
+  let duplicate = false;
 
   try {
     await pool.query("INSERT INTO events (event_id, event_type, payload) VALUES ($1, $2, $3)", [eventId, eventType, body]);
   } catch (err: any) {
     if (err.code === "23505") {
-      res.status(200).send("Already processed");
+      duplicate = true;
+    } else {
+      console.error("DB error:", err.message);
+      res.status(500).send("Internal error");
       return;
     }
-    console.error("DB error:", err.message);
-    res.status(500).send("Internal error");
-    return;
   }
 
-  res.status(200).send("OK");
-
-  if (eventType === "payment.failed") {
-    void processRecoveryEvent(eventId).catch(async (err: any) => {
-      console.error(`Recovery pipeline failed for ${eventId}:`, err.message);
-      await logAuditEvent(eventId, "pipeline_error", { error: err.message });
-    });
-  } else if (eventType === "payment_link.paid" || eventType === "payment.captured") {
-    void recordRecoveryFromWebhook(eventId, body).catch((err: any) => {
-      console.error(`Recovery confirmation failed for ${eventId}:`, err.message);
-    });
-  }
+  res.status(200).send(duplicate ? "Already stored; processing replayed safely" : "OK");
+  dispatchStoredEvent(eventId, eventType, body);
 });
 
 const port = Number(process.env.PORT ?? 3000);

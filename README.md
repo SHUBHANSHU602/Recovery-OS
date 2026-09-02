@@ -181,12 +181,14 @@ cd Recovery-OS
 cp .env.example .env
 
 docker compose up -d
-npm ci
+npm install
 npm run db:migrate
 npm run typecheck
 npm run test:core
 npm start
 ```
+
+The dependency versions in `package.json` are pinned. Generate and commit a fresh lockfile after the first validated local install; the stale pre-hardening lockfile was deliberately removed rather than left inconsistent with the repaired manifest.
 
 Fill these values in `.env` before exercising external integrations:
 

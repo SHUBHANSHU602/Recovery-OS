@@ -130,13 +130,22 @@
 ### 10. A real `payment.failed` webhook previously stopped at storage instead of driving the recovery pipeline
 **What this means in English:** The webhook receiver inserted the event into Postgres, but diagnosis/intervention/execution still depended on separate batch scripts. A live failure was not actually an automatic closed-loop recovery event.
 
-**Fix:** after a valid, newly stored `payment.failed` webhook is acknowledged, the server starts the single-event recovery pipeline: evidence -> diagnosis -> verifier -> intervention -> policy -> execution. Payment-completion webhooks take the separate confirmation path.
+**Fix:** after a valid, stored `payment.failed` webhook is acknowledged, the server starts the single-event recovery pipeline: evidence -> diagnosis -> verifier -> intervention -> policy -> execution. Payment-completion webhooks take the separate confirmation path.
 
-**Known remaining limitation:** this handoff is process-local rather than a durable queue. If the Node process crashes after the webhook has been acknowledged but before processing finishes, the event remains safely stored but automatic processing may need replay. A durable queue/worker is a later reliability improvement, not hidden as solved.
+**Known remaining limitation:** the handoff is process-local rather than a durable queue. If the Node process crashes after acknowledgement, the source event remains stored and can be replayed, but there is not yet a durable worker guaranteeing automatic resumption without replay.
 
 ### 11. Database state needed new first-class links between a failed event, its actions and the money recovered
 **What this means in English:** Previously, conversational actions could exist without a direct event foreign key and there was nowhere to store a confirmed recovery outcome. That made policy queries and financial attribution unnecessarily indirect.
 
-**Fix:** migration `sql/001_track3_hardening.sql` adds `actions.event_id`, backfills it where the intervention chain makes attribution possible, creates the confirmed `recoveries` table, and creates `scheduled_recovery_actions` for real backoff behavior.
+**Fix:** migration `sql/001_track3_hardening.sql` adds `actions.event_id`, backfills it where the intervention chain makes attribution possible, makes `intervention_id` nullable for conversational actions, creates the confirmed `recoveries` table, and creates `scheduled_recovery_actions` for real backoff behavior.
+
+### 12. First hardening patch made webhook deduplication safe for storage but unsafe for crash recovery
+**What this means in English:** The first version of the hardening patch returned immediately when a duplicate webhook event ID was seen. That prevents duplicate rows, but it also means a legitimate replay could not finish work if the process had crashed after storing the event but before completing diagnosis, intervention or execution. A second problem existed inside the single-event pipeline: seeing an existing diagnosis row was treated as proof that the entire event had already finished, even if the crash happened immediately after diagnosis.
+
+**How it was found:** static review of the new replay/crash path before local execution, not a production incident.
+
+**Fix:** duplicate, valid webhooks are still not inserted twice, but they are dispatched through idempotent processing again. The single-event pipeline is now stage-resumable: it reuses an existing diagnosis, creates a missing intervention if necessary, reuses an existing intervention, then calls the idempotent executor. A Postgres advisory lock keyed by event ID serializes concurrent processing of the same failed payment so two simultaneous deliveries cannot race to create duplicate diagnosis/intervention state.
+
+**Verification status:** code structure reviewed; kill/restart/replay testing is still pending in the owner's environment.
 
 **Verification status for Day 11 overall:** code review and syntax-oriented checks completed. Database migration, TypeScript build, local Postgres integration, Groq calls, Razorpay Test Mode link creation and real `payment_link.paid` confirmation are intentionally left for the repository owner to run in the target environment. Any failure found during those tests should be added below this section with the observed symptom, root cause, fix and retest result rather than silently editing the history.

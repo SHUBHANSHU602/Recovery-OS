@@ -8,6 +8,7 @@ export type RecoveryStatus =
   | "ACTION_CHOSEN"
   | "POLICY_APPROVED"
   | "POLICY_BLOCKED"
+  | "SCHEDULED"
   | "EXECUTED"
   | "WAITING_FOR_OUTCOME"
   | "RECOVERED"
@@ -53,6 +54,65 @@ export async function ensureTrack3Schema(pool: Pool): Promise<void> {
       sent_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       delivery_state TEXT NOT NULL DEFAULT 'accepted'
     );
+
+    CREATE TABLE IF NOT EXISTS webhook_deliveries (
+      event_id TEXT PRIMARY KEY REFERENCES events(event_id) ON DELETE CASCADE,
+      event_type TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'RECEIVED',
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      claimed_at TIMESTAMPTZ,
+      processed_at TIMESTAMPTZ,
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS scheduled_actions (
+      id BIGSERIAL PRIMARY KEY,
+      case_id BIGINT NOT NULL REFERENCES recovery_cases(id) ON DELETE CASCADE,
+      event_id TEXT NOT NULL REFERENCES events(event_id) ON DELETE CASCADE,
+      intervention_id BIGINT,
+      desired_action TEXT NOT NULL,
+      schedule_key TEXT NOT NULL UNIQUE,
+      run_at TIMESTAMPTZ NOT NULL,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      claimed_at TIMESTAMPTZ,
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE INDEX IF NOT EXISTS scheduled_actions_due_idx
+      ON scheduled_actions (run_at, status);
+
+    CREATE TABLE IF NOT EXISTS human_escalations (
+      id BIGSERIAL PRIMARY KEY,
+      case_id BIGINT NOT NULL UNIQUE REFERENCES recovery_cases(id) ON DELETE CASCADE,
+      event_id TEXT NOT NULL REFERENCES events(event_id) ON DELETE CASCADE,
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'OPEN',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      resolved_at TIMESTAMPTZ
+    );
+
+    CREATE OR REPLACE FUNCTION prevent_audit_log_mutation()
+    RETURNS trigger AS $$
+    BEGIN
+      RAISE EXCEPTION 'audit_log is append-only: UPDATE/DELETE is not allowed';
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DO $$
+    BEGIN
+      IF to_regclass('public.audit_log') IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_log_append_only_guard') THEN
+        CREATE TRIGGER audit_log_append_only_guard
+        BEFORE UPDATE OR DELETE ON audit_log
+        FOR EACH ROW EXECUTE FUNCTION prevent_audit_log_mutation();
+      END IF;
+    END $$;
   `);
 }
 
@@ -104,21 +164,58 @@ export async function setRecoveryState(
 export async function markRecoveryFromPaymentLink(
   pool: Pool,
   paymentLinkId: string,
-  paidAmount: number
+  paidAmount: number,
+  referenceId?: string | null
 ): Promise<boolean> {
+  const referenceMatch = /^recovery_case_(\d+)$/.exec(referenceId ?? "");
+  const referencedCaseId = referenceMatch ? Number(referenceMatch[1]) : null;
+
   const result = await pool.query(
     `UPDATE recovery_cases
      SET status = 'RECOVERED',
          recovered_amount = LEAST(amount_at_risk, GREATEST(recovered_amount, $2)),
          recovered_at = COALESCE(recovered_at, now()),
          terminal_reason = 'trusted_payment_link_paid',
+         razorpay_payment_link_id = COALESCE(razorpay_payment_link_id, $1),
          updated_at = now()
-     WHERE razorpay_payment_link_id = $1
-       AND status <> 'RECOVERED'
+     WHERE (razorpay_payment_link_id = $1 OR ($3::bigint IS NOT NULL AND id = $3))
+       AND status NOT IN ('RECOVERED', 'STOPPED', 'ESCALATED')
      RETURNING id`,
-    [paymentLinkId, Math.max(0, paidAmount)]
+    [paymentLinkId, Math.max(0, paidAmount), referencedCaseId]
   );
   return result.rows.length === 1;
+}
+
+export async function markOriginalPaymentCaptured(pool: Pool, paymentId: string): Promise<string[]> {
+  const result = await pool.query(
+    `UPDATE recovery_cases
+     SET status = 'STOPPED',
+         terminal_reason = 'original_payment_captured',
+         updated_at = now()
+     WHERE original_payment_id = $1
+       AND status NOT IN ('RECOVERED', 'STOPPED', 'ESCALATED')
+     RETURNING original_event_id`,
+    [paymentId]
+  );
+  return result.rows.map((row) => String(row.original_event_id));
+}
+
+export async function createHumanEscalation(
+  pool: Pool,
+  caseId: number,
+  eventId: string,
+  reason: string
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO human_escalations (case_id, event_id, reason, status)
+     VALUES ($1, $2, $3, 'OPEN')
+     ON CONFLICT (case_id) DO UPDATE
+       SET reason = EXCLUDED.reason,
+           status = 'OPEN',
+           updated_at = now()`,
+    [caseId, eventId, reason]
+  );
+  await setRecoveryState(pool, caseId, "ESCALATED", { terminalReason: reason });
 }
 
 export async function isRecoveryTerminal(pool: Pool, eventId: string): Promise<boolean> {

@@ -16,12 +16,10 @@ export async function loadPolicyContext(
 
   const retryResult = await pool.query(
     `SELECT COUNT(*)
-     FROM actions a
-     LEFT JOIN interventions i ON i.id = a.intervention_id
-     LEFT JOIN diagnoses d ON d.id = i.diagnosis_id
-     WHERE d.event_id = $1
-       AND a.razorpay_api_call = 'payment_links.create'
-       AND a.status IN ('pending', 'success', 'failed', 'error')`,
+     FROM actions
+     WHERE idempotency_key LIKE $1 || '_%'
+       AND razorpay_api_call = 'payment_links.create'
+       AND status IN ('pending', 'success', 'failed', 'error')`,
     [input.eventId]
   );
 
@@ -40,8 +38,6 @@ export async function loadPolicyContext(
     [input.eventId]
   );
 
-  // No opt-out store existed in the reviewed schema. Fail closed only when an explicit
-  // opt-out signal is present in an event payload; otherwise default false.
   const eventResult = await pool.query("SELECT payload FROM events WHERE event_id = $1", [input.eventId]);
   const optedOut = Boolean(eventResult.rows[0]?.payload?.customer_opted_out === true);
 

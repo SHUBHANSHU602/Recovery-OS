@@ -1,45 +1,72 @@
 import type { Action } from "./chooseAction";
 
-interface PolicyContext {
+export type ExecutableAction = Action | "stop";
+
+export interface PolicyContext {
   chosenAction: Action;
-  customerFailureCount: number; // total prior failures for this customer
-  customerContactedInLast24h: boolean; // has this customer already gotten a whatsapp_nudge today
+  automatedRetryCount?: number;
+  contactsLast24h?: number;
+  alreadyRecovered?: boolean;
+  optedOut?: boolean;
+  // Backward-compatible inputs for the existing isolated policy tests.
+  customerFailureCount?: number;
+  customerContactedInLast24h?: boolean;
 }
 
-interface PolicyOutcome {
-  result: "APPROVED" | "BLOCKED_ESCALATED";
+export interface PolicyOutcome {
+  result: "APPROVED" | "BLOCKED_ESCALATED" | "BLOCKED_STOPPED";
   reason: string;
-  finalAction: Action;
+  finalAction: ExecutableAction;
 }
 
 const MAX_AUTOMATED_RETRIES = 3;
 const MAX_CONTACTS_PER_DAY = 1;
 
 export function applyPolicyGate(context: PolicyContext): PolicyOutcome {
-  // Hard cap: too many prior failures -> force human escalation regardless of what the LLM wanted
+  const automatedRetryCount = context.automatedRetryCount ?? context.customerFailureCount ?? 0;
+  const contactsLast24h = context.contactsLast24h ?? (context.customerContactedInLast24h ? 1 : 0);
+
+  if (context.alreadyRecovered) {
+    return {
+      result: "BLOCKED_STOPPED",
+      reason: "Recovery case is already recovered. No further automated side effect is allowed.",
+      finalAction: "stop",
+    };
+  }
+
+  if (context.optedOut) {
+    return {
+      result: "BLOCKED_STOPPED",
+      reason: "Customer has opted out of automated recovery contact.",
+      finalAction: "stop",
+    };
+  }
+
   if (
     (context.chosenAction === "retry_now" || context.chosenAction === "retry_with_backoff") &&
-    context.customerFailureCount >= MAX_AUTOMATED_RETRIES
+    automatedRetryCount >= MAX_AUTOMATED_RETRIES
   ) {
     return {
       result: "BLOCKED_ESCALATED",
-      reason: `Customer has ${context.customerFailureCount} prior failures, exceeding the max of ${MAX_AUTOMATED_RETRIES} automated retries. Forcing escalation instead of another automated attempt.`,
+      reason: `Recovery case already has ${automatedRetryCount} automated retry attempts; maximum is ${MAX_AUTOMATED_RETRIES}. Escalating instead of executing again.`,
       finalAction: "escalate_to_human",
     };
   }
 
-  // Contact cap: don't spam a customer who's already been reached out to today
-  if (context.chosenAction === "whatsapp_nudge" && context.customerContactedInLast24h) {
+  if (
+    (context.chosenAction === "whatsapp_nudge" || context.chosenAction === "offer_alternate_payment_method") &&
+    contactsLast24h >= MAX_CONTACTS_PER_DAY
+  ) {
     return {
       result: "BLOCKED_ESCALATED",
-      reason: `Customer already contacted via WhatsApp in the last 24 hours. Blocking a second contact attempt to avoid spamming; escalating instead.`,
+      reason: `Customer already has ${contactsLast24h} outbound recovery contact(s) in the last 24 hours. Blocking another contact and escalating.`,
       finalAction: "escalate_to_human",
     };
   }
 
   return {
     result: "APPROVED",
-    reason: "Chosen action is within policy limits.",
+    reason: "Chosen action is within deterministic policy limits.",
     finalAction: context.chosenAction,
   };
 }

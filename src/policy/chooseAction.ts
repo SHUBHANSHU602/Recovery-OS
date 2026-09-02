@@ -50,14 +50,34 @@ const ACTION_TOOL = {
         },
       },
       required: ["chosen_action", "reasoning"],
+      additionalProperties: false,
     },
   },
 };
 
-export async function chooseAction(context: ActionContext): Promise<Intervention> {
-  if (!process.env.GROQ_API_KEY) {
-    throw new Error("GROQ_API_KEY is missing from .env");
+function parseIntervention(argumentsJson: string): Intervention {
+  let parsed: any;
+  try {
+    parsed = JSON.parse(argumentsJson);
+  } catch {
+    throw new Error("Model returned malformed JSON for intervention selection");
   }
+
+  if (!ALLOWED_ACTIONS.includes(parsed?.chosen_action as Action)) {
+    throw new Error(`Model returned unsupported recovery action: ${String(parsed?.chosen_action)}`);
+  }
+  if (typeof parsed?.reasoning !== "string" || parsed.reasoning.trim().length === 0) {
+    throw new Error("Model returned an empty intervention rationale");
+  }
+
+  return {
+    chosen_action: parsed.chosen_action,
+    reasoning: parsed.reasoning.trim(),
+  };
+}
+
+export async function chooseAction(context: ActionContext): Promise<Intervention> {
+  if (!process.env.GROQ_API_KEY) throw new Error("GROQ_API_KEY is missing from .env");
 
   const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
   const priorOutcomes = context.priorRecoveryOutcomes.length
@@ -95,7 +115,6 @@ Call choose_action with the single best recommendation and concise reasoning.`;
   });
 
   const toolCall = response.choices[0]?.message?.tool_calls?.[0];
-  if (!toolCall) throw new Error("Model did not return a tool call");
-
-  return JSON.parse(toolCall.function.arguments) as Intervention;
+  if (!toolCall) throw new Error("Model did not return an intervention tool call");
+  return parseIntervention(toolCall.function.arguments);
 }

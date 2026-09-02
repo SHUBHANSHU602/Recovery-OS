@@ -6,7 +6,6 @@ const pool = new Pool();
 async function runEvaluation(batchName: string) {
   console.log(`\n========== EVALUATION: ${batchName} ==========\n`);
 
-  // 1. Diagnosis accuracy
   const diagnosisResult = await pool.query(
     `SELECT d.root_cause, rb.ground_truth_cause, d.verifier_result
      FROM diagnoses d
@@ -15,44 +14,53 @@ async function runEvaluation(batchName: string) {
     [batchName]
   );
   const totalDiagnoses = diagnosisResult.rows.length;
-  const correctDiagnoses = diagnosisResult.rows.filter(r => r.root_cause === r.ground_truth_cause).length;
+  const correctDiagnoses = diagnosisResult.rows.filter((r) => r.root_cause === r.ground_truth_cause).length;
   const diagnosisAccuracy = totalDiagnoses > 0 ? (correctDiagnoses / totalDiagnoses) * 100 : 0;
 
   console.log(`--- Diagnosis Accuracy ---`);
-  console.log(`${correctDiagnoses}/${totalDiagnoses} correct (${diagnosisAccuracy.toFixed(1)}%)`);
-  console.log(`Note: sample size is ${totalDiagnoses} events -- small-sample result, reported honestly rather than inflated.\n`);
+  console.log(`${correctDiagnoses}/${totalDiagnoses} correct (${diagnosisAccuracy.toFixed(1)}%)\n`);
 
-  // 2. Verifier intervention rate (how often the verifier corrected/flagged a diagnosis on real data)
-  const verifierInterventions = diagnosisResult.rows.filter(r => r.verifier_result !== "PASSED").length;
-  console.log(`--- Verifier Behavior ---`);
-  console.log(`Intervened on ${verifierInterventions}/${totalDiagnoses} real diagnoses.`);
-  console.log(`Separately proven via deliberate adversarial test (testVerifier.ts): 4/4 expected outcomes, including catching a deliberately wrong systemic_bank_outage claim.\n`);
-
-  // 3. Recovery rate: successfully initiated actions (proxy metric, see note)
-  const actionsResult = await pool.query(
-    `SELECT a.status, a.razorpay_api_call
-     FROM actions a
-     JOIN interventions i ON i.id = a.intervention_id
-     JOIN diagnoses d ON d.id = i.diagnosis_id
-     JOIN recovery_batches rb ON rb.event_id = d.event_id
-     WHERE rb.batch_name = $1
-     UNION ALL
-     SELECT a.status, a.razorpay_api_call
-     FROM actions a
-     WHERE a.intervention_id IS NULL AND a.idempotency_key LIKE $2`,
-    [batchName, "synthetic_%"]
+  const valueResult = await pool.query(
+    `SELECT
+       COUNT(*)::int AS total_events,
+       COALESCE(SUM((e.payload->'payload'->'payment'->'entity'->>'amount')::bigint), 0)::bigint AS revenue_at_risk,
+       COUNT(r.id)::int AS recovered_events,
+       COALESCE(SUM(r.recovered_amount), 0)::bigint AS recovered_revenue
+     FROM recovery_batches rb
+     JOIN events e ON e.event_id = rb.event_id
+     LEFT JOIN recoveries r ON r.event_id = rb.event_id
+     WHERE rb.batch_name = $1`,
+    [batchName]
   );
-  const totalActions = actionsResult.rows.length;
-  const successfulActions = actionsResult.rows.filter(r => r.status === "success").length;
-  const recoveryRate = totalActions > 0 ? (successfulActions / totalActions) * 100 : 0;
 
-  console.log(`--- Recovery Rate (proxy: successful initiation, not confirmed customer completion) ---`);
-  console.log(`${successfulActions}/${totalActions} actions successfully initiated (${recoveryRate.toFixed(1)}%)`);
-  console.log(`Note: test mode has no real customer to complete payment after initiation -- this measures the system's own success at taking action, not end-customer follow-through.\n`);
+  const values = valueResult.rows[0];
+  const totalEvents = Number(values.total_events);
+  const recoveredEvents = Number(values.recovered_events);
+  const revenueAtRisk = Number(values.revenue_at_risk);
+  const recoveredRevenue = Number(values.recovered_revenue);
+  const transactionRecoveryRate = totalEvents > 0 ? (recoveredEvents / totalEvents) * 100 : 0;
+  const valueRecoveryRate = revenueAtRisk > 0 ? (recoveredRevenue / revenueAtRisk) * 100 : 0;
 
-  // 4. False-escalation rate: escalate_to_human chosen for a NON-ambiguous, correctly-diagnosed event
-  // (escalating on a genuinely ambiguous case is correct behavior, not a false escalation)
-  const interventionsResult = await pool.query(
+  console.log(`--- Confirmed Revenue Recovery ---`);
+  console.log(`Revenue at risk: ₹${(revenueAtRisk / 100).toFixed(2)}`);
+  console.log(`Confirmed recovered revenue: ₹${(recoveredRevenue / 100).toFixed(2)}`);
+  console.log(`Recovered transactions: ${recoveredEvents}/${totalEvents} (${transactionRecoveryRate.toFixed(1)}%)`);
+  console.log(`Value recovery rate: ${valueRecoveryRate.toFixed(1)}%`);
+  console.log(`Only payment completion webhooks count as recovered. Creating a payment link does not.\n`);
+
+  const actionResult = await pool.query(
+    `SELECT COUNT(*)::int AS total_actions,
+            COUNT(*) FILTER (WHERE status = 'success')::int AS successful_actions
+     FROM actions a
+     JOIN events e ON e.event_id = a.event_id
+     JOIN recovery_batches rb ON rb.event_id = e.event_id
+     WHERE rb.batch_name = $1`,
+    [batchName]
+  );
+  console.log(`--- Recovery Operations (secondary metric) ---`);
+  console.log(`${actionResult.rows[0].successful_actions}/${actionResult.rows[0].total_actions} recorded actions completed successfully.\n`);
+
+  const falseEscalationResult = await pool.query(
     `SELECT i.final_action, rb.ground_truth_cause
      FROM interventions i
      JOIN diagnoses d ON d.id = i.diagnosis_id
@@ -60,16 +68,14 @@ async function runEvaluation(batchName: string) {
      WHERE rb.batch_name = $1`,
     [batchName]
   );
-  const totalInterventions = interventionsResult.rows.length;
-  const falseEscalations = interventionsResult.rows.filter(
-    r => r.final_action === "escalate_to_human" && r.ground_truth_cause !== "ambiguous"
+  const falseEscalations = falseEscalationResult.rows.filter(
+    (r) => r.final_action === "escalate_to_human" && r.ground_truth_cause !== "ambiguous"
   ).length;
+  const totalInterventions = falseEscalationResult.rows.length;
   const falseEscalationRate = totalInterventions > 0 ? (falseEscalations / totalInterventions) * 100 : 0;
 
   console.log(`--- False-Escalation Rate ---`);
-  console.log(`${falseEscalations}/${totalInterventions} events escalated to human despite a confident, non-ambiguous ground truth (${falseEscalationRate.toFixed(1)}%)`);
-  console.log(`Note: escalating a genuinely ambiguous case is correct behavior and NOT counted as a false escalation.\n`);
-
+  console.log(`${falseEscalations}/${totalInterventions} (${falseEscalationRate.toFixed(1)}%)\n`);
   console.log(`========== END EVALUATION ==========\n`);
 }
 
@@ -79,4 +85,3 @@ runEvaluation("batch_1")
     process.exitCode = 1;
   })
   .finally(() => pool.end());
-  

@@ -1,45 +1,55 @@
 import type { Action } from "./chooseAction";
 
+export type FinalAction = Action | "stop_recovery";
+
 interface PolicyContext {
   chosenAction: Action;
-  customerFailureCount: number; // total prior failures for this customer
-  customerContactedInLast24h: boolean; // has this customer already gotten a whatsapp_nudge today
+  automatedRecoveryAttemptCount: number;
+  customerContactedInLast24h: boolean;
+  paymentAlreadyRecovered: boolean;
 }
 
 interface PolicyOutcome {
-  result: "APPROVED" | "BLOCKED_ESCALATED";
+  result: "APPROVED" | "BLOCKED_ESCALATED" | "BLOCKED_STOPPED";
   reason: string;
-  finalAction: Action;
+  finalAction: FinalAction;
 }
 
-const MAX_AUTOMATED_RETRIES = 3;
-const MAX_CONTACTS_PER_DAY = 1;
+const MAX_AUTOMATED_PAYMENT_ATTEMPTS = 3;
 
 export function applyPolicyGate(context: PolicyContext): PolicyOutcome {
-  // Hard cap: too many prior failures -> force human escalation regardless of what the LLM wanted
-  if (
-    (context.chosenAction === "retry_now" || context.chosenAction === "retry_with_backoff") &&
-    context.customerFailureCount >= MAX_AUTOMATED_RETRIES
-  ) {
+  if (context.paymentAlreadyRecovered) {
+    return {
+      result: "BLOCKED_STOPPED",
+      reason: "The original failed payment has already been recovered. No further recovery action is allowed.",
+      finalAction: "stop_recovery",
+    };
+  }
+
+  const createsAnotherPaymentAttempt =
+    context.chosenAction === "retry_now" ||
+    context.chosenAction === "retry_with_backoff" ||
+    context.chosenAction === "offer_alternate_payment_method";
+
+  if (createsAnotherPaymentAttempt && context.automatedRecoveryAttemptCount >= MAX_AUTOMATED_PAYMENT_ATTEMPTS) {
     return {
       result: "BLOCKED_ESCALATED",
-      reason: `Customer has ${context.customerFailureCount} prior failures, exceeding the max of ${MAX_AUTOMATED_RETRIES} automated retries. Forcing escalation instead of another automated attempt.`,
+      reason: `Customer already has ${context.automatedRecoveryAttemptCount} automated recovery payment attempt(s); the maximum is ${MAX_AUTOMATED_PAYMENT_ATTEMPTS}. Escalating instead of creating another payment request.`,
       finalAction: "escalate_to_human",
     };
   }
 
-  // Contact cap: don't spam a customer who's already been reached out to today
   if (context.chosenAction === "whatsapp_nudge" && context.customerContactedInLast24h) {
     return {
       result: "BLOCKED_ESCALATED",
-      reason: `Customer already contacted via WhatsApp in the last 24 hours. Blocking a second contact attempt to avoid spamming; escalating instead.`,
+      reason: "Customer was already contacted about a failed payment in the last 24 hours. Blocking another automated nudge to avoid repeated outreach.",
       finalAction: "escalate_to_human",
     };
   }
 
   return {
     result: "APPROVED",
-    reason: "Chosen action is within policy limits.",
+    reason: "Chosen action is within recovery policy limits.",
     finalAction: context.chosenAction,
   };
 }

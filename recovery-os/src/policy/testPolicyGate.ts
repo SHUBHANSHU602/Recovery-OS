@@ -1,29 +1,38 @@
+import assert from "assert";
 import { applyPolicyGate } from "./policyGate";
 
-console.log("=== Test 1: LLM wants retry_now, but customer already failed 4 times (over the cap of 3) ===");
-console.log(applyPolicyGate({
+const tooManyAttempts = applyPolicyGate({
   chosenAction: "retry_now",
-  customerFailureCount: 4,
+  automatedRecoveryAttemptCount: 3,
   customerContactedInLast24h: false,
-}));
+  paymentAlreadyRecovered: false,
+});
+assert.equal(tooManyAttempts.result, "BLOCKED_ESCALATED");
+assert.equal(tooManyAttempts.finalAction, "escalate_to_human");
 
-console.log("\n=== Test 2: LLM wants retry_now, customer has failed only once -- should be approved ===");
-console.log(applyPolicyGate({
+const allowedRetry = applyPolicyGate({
   chosenAction: "retry_now",
-  customerFailureCount: 1,
+  automatedRecoveryAttemptCount: 1,
   customerContactedInLast24h: false,
-}));
+  paymentAlreadyRecovered: false,
+});
+assert.equal(allowedRetry.result, "APPROVED");
 
-console.log("\n=== Test 3: LLM wants whatsapp_nudge, but customer was already contacted today ===");
-console.log(applyPolicyGate({
+const repeatedContact = applyPolicyGate({
   chosenAction: "whatsapp_nudge",
-  customerFailureCount: 0,
+  automatedRecoveryAttemptCount: 0,
   customerContactedInLast24h: true,
-}));
+  paymentAlreadyRecovered: false,
+});
+assert.equal(repeatedContact.result, "BLOCKED_ESCALATED");
 
-console.log("\n=== Test 4: escalate_to_human is always fine, no caps apply to it ===");
-console.log(applyPolicyGate({
-  chosenAction: "escalate_to_human",
-  customerFailureCount: 10,
-  customerContactedInLast24h: true,
-}));
+const alreadyRecovered = applyPolicyGate({
+  chosenAction: "retry_with_backoff",
+  automatedRecoveryAttemptCount: 0,
+  customerContactedInLast24h: false,
+  paymentAlreadyRecovered: true,
+});
+assert.equal(alreadyRecovered.result, "BLOCKED_STOPPED");
+assert.equal(alreadyRecovered.finalAction, "stop_recovery");
+
+console.log("Policy gate tests passed: 4/4");

@@ -1,40 +1,80 @@
 import "dotenv/config";
 import express, { Request, Response } from "express";
 import { Pool } from "pg";
+import { verifyRazorpayWebhookSignature } from "./verifyWebhookSignature";
+import { processRecoveryEvent } from "../pipeline/processRecoveryEvent";
+import { recordRecoveryFromWebhook } from "../recovery/recordRecovery";
+import { runDueScheduledActions } from "../execution/scheduler";
+import { logAuditEvent } from "../ledger/auditLog";
 
 const app = express();
-app.use(express.json());
+const pool = new Pool();
 
-const pool = new Pool(); // reads PGUSER, PGHOST, PGDATABASE, PGPASSWORD, PGPORT from .env automatically
-
-app.post("/webhooks/razorpay", async (req: Request, res: Response) => {
+app.post("/webhooks/razorpay", express.raw({ type: "application/json" }), async (req: Request, res: Response) => {
   const eventId = req.headers["x-razorpay-event-id"] as string | undefined;
-  const eventType = req.body.event;
+  const signature = req.headers["x-razorpay-signature"] as string | undefined;
+  const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
+  const rawBody = req.body as Buffer;
 
   if (!eventId) {
-    console.log("Rejected: missing x-razorpay-event-id header");
     res.status(400).send("Missing event id");
     return;
   }
+  if (!signature) {
+    res.status(401).send("Missing webhook signature");
+    return;
+  }
+  if (!webhookSecret) {
+    console.error("RAZORPAY_WEBHOOK_SECRET is not configured.");
+    res.status(500).send("Webhook secret not configured");
+    return;
+  }
+  if (!verifyRazorpayWebhookSignature(rawBody, signature, webhookSecret)) {
+    console.warn(`Rejected webhook ${eventId}: invalid signature.`);
+    res.status(401).send("Invalid webhook signature");
+    return;
+  }
+
+  let body: any;
+  try {
+    body = JSON.parse(rawBody.toString("utf8"));
+  } catch {
+    res.status(400).send("Invalid JSON");
+    return;
+  }
+
+  const eventType = body.event as string;
 
   try {
-    await pool.query(
-      "INSERT INTO events (event_id, event_type, payload) VALUES ($1, $2, $3)",
-      [eventId, eventType, req.body]
-    );
-    console.log(`Stored new event: ${eventId} (${eventType})`);
-    res.status(200).send("OK");
+    await pool.query("INSERT INTO events (event_id, event_type, payload) VALUES ($1, $2, $3)", [eventId, eventType, body]);
   } catch (err: any) {
     if (err.code === "23505") {
-      console.log(`Duplicate event ignored: ${eventId}`);
       res.status(200).send("Already processed");
       return;
     }
     console.error("DB error:", err.message);
     res.status(500).send("Internal error");
+    return;
+  }
+
+  res.status(200).send("OK");
+
+  if (eventType === "payment.failed") {
+    void processRecoveryEvent(eventId).catch(async (err: any) => {
+      console.error(`Recovery pipeline failed for ${eventId}:`, err.message);
+      await logAuditEvent(eventId, "pipeline_error", { error: err.message });
+    });
+  } else if (eventType === "payment_link.paid" || eventType === "payment.captured") {
+    void recordRecoveryFromWebhook(eventId, body).catch((err: any) => {
+      console.error(`Recovery confirmation failed for ${eventId}:`, err.message);
+    });
   }
 });
 
-app.listen(3000, () => {
-  console.log("Server listening on http://localhost:3000");
-});
+const port = Number(process.env.PORT ?? 3000);
+app.listen(port, () => console.log(`Server listening on http://localhost:${port}`));
+
+const workerIntervalMs = Number(process.env.RECOVERY_WORKER_INTERVAL_MS ?? 15000);
+setInterval(() => {
+  void runDueScheduledActions().catch((err) => console.error("Scheduled recovery worker failed:", err));
+}, workerIntervalMs).unref();

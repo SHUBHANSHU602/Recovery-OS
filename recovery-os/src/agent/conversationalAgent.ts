@@ -11,30 +11,22 @@ const TOOLS = [
     function: {
       name: "check_customer_risk_flags",
       description: "Check this customer's payment failure history to see if they're flagged as high-risk.",
-      parameters: {
-        type: "object",
-        properties: { customerEmail: { type: "string" } },
-        required: ["customerEmail"],
-      },
+      parameters: { type: "object", properties: {} },
     },
   },
   {
     type: "function" as const,
     function: {
       name: "generate_payment_link",
-      description: "Generate a new Razorpay payment link for the customer to retry payment, e.g. with an alternate method.",
-      parameters: {
-        type: "object",
-        properties: { amount: { type: "number", description: "Amount in paise" } },
-        required: ["amount"],
-      },
+      description: "Request a policy-checked Razorpay recovery payment link for the current customer and failed payment.",
+      parameters: { type: "object", properties: {} },
     },
   },
   {
     type: "function" as const,
     function: {
       name: "escalate_to_human",
-      description: "Escalate this conversation to a human agent -- use when the customer is upset, confused, or the situation is beyond what you can resolve.",
+      description: "Escalate this conversation to a human agent when the situation is unclear or requires manual handling.",
       parameters: {
         type: "object",
         properties: { reason: { type: "string" } },
@@ -47,15 +39,31 @@ const TOOLS = [
 function buildSystemPrompt(customerEmail: string, amount: number): string {
   return `You are a payment recovery assistant helping a customer whose payment failed.
 
-Known context (you already have this, never ask the customer for it):
+Known backend context (never ask the customer to repeat it):
 - Customer email: ${customerEmail}
 - Amount due: ${amount} paise (₹${(amount / 100).toFixed(2)})
 
-Be brief, warm, and helpful. Your job is to understand why they couldn't pay and help them complete it --
-using tools when appropriate, not just chatting. If they mention a card issue, offer to generate a new
-payment link so they can use a different method -- you have everything you need to do this immediately,
-don't ask the customer for their email or the amount. If they seem frustrated or the issue is unclear,
-escalate to a human rather than guessing. Never make promises about refunds or account changes you can't verify.`;
+Be brief and helpful. Use tools when an action is needed. Tools are policy-checked by the backend, so if a tool reports that an action is blocked, explain that a human will take over rather than trying to bypass the block. Never make promises about refunds or account changes you cannot verify.`;
+}
+
+export async function startConversation(
+  eventId: string,
+  customerEmail: string,
+  amount: number,
+  openingMessage: string
+): Promise<void> {
+  const existing = await pool.query("SELECT id FROM conversations WHERE event_id = $1", [eventId]);
+  if (existing.rows.length > 0) return;
+
+  const messages = [
+    { role: "system", content: buildSystemPrompt(customerEmail, amount) },
+    { role: "assistant", content: openingMessage },
+  ];
+
+  await pool.query(
+    "INSERT INTO conversations (event_id, messages, status) VALUES ($1, $2, 'active')",
+    [eventId, JSON.stringify(messages)]
+  );
 }
 
 export async function runAgentTurn(eventId: string, customerEmail: string, amount: number, userMessage: string) {
@@ -66,9 +74,9 @@ export async function runAgentTurn(eventId: string, customerEmail: string, amoun
   let messages: any[];
 
   if (convoResult.rows.length === 0) {
-    messages = [{ role: "system", content:buildSystemPrompt(customerEmail, amount)}];
+    messages = [{ role: "system", content: buildSystemPrompt(customerEmail, amount) }];
     const inserted = await pool.query(
-      "INSERT INTO conversations (event_id, messages) VALUES ($1, $2) RETURNING id",
+      "INSERT INTO conversations (event_id, messages, status) VALUES ($1, $2, 'active') RETURNING id",
       [eventId, JSON.stringify(messages)]
     );
     conversationId = inserted.rows[0].id;
@@ -88,37 +96,29 @@ export async function runAgentTurn(eventId: string, customerEmail: string, amoun
   let assistantMessage = response.choices[0].message;
   messages.push(assistantMessage);
 
-  // Tool-calling loop: keep resolving tool calls until the agent responds with plain text
   while (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
     for (const toolCall of assistantMessage.tool_calls) {
-      const args = JSON.parse(toolCall.function.arguments);
+      const args = JSON.parse(toolCall.function.arguments || "{}");
       let result: any;
 
       if (toolCall.function.name === "check_customer_risk_flags") {
         result = await checkCustomerRiskFlags(customerEmail);
       } else if (toolCall.function.name === "generate_payment_link") {
-        result = await generatePaymentLink(eventId, amount);
+        result = await generatePaymentLink(eventId, amount, customerEmail);
       } else if (toolCall.function.name === "escalate_to_human") {
         result = await escalateToHuman(eventId, args.reason);
+      } else {
+        result = { error: "Unknown tool requested." };
       }
 
-      messages.push({
-        role: "tool",
-        tool_call_id: toolCall.id,
-        content: JSON.stringify(result),
-      });
+      messages.push({ role: "tool", tool_call_id: toolCall.id, content: JSON.stringify(result) });
     }
 
-    response = await groq.chat.completions.create({
-      model: "openai/gpt-oss-120b",
-      messages,
-      tools: TOOLS,
-    });
+    response = await groq.chat.completions.create({ model: "openai/gpt-oss-120b", messages, tools: TOOLS });
     assistantMessage = response.choices[0].message;
     messages.push(assistantMessage);
   }
 
   await pool.query("UPDATE conversations SET messages = $1, updated_at = now() WHERE id = $2", [JSON.stringify(messages), conversationId]);
-
   return assistantMessage.content;
 }

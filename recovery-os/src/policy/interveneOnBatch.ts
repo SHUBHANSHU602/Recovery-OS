@@ -2,13 +2,12 @@ import "dotenv/config";
 import { Pool } from "pg";
 import { chooseAction } from "./chooseAction";
 import { applyPolicyGate } from "./policyGate";
+import { getPolicyRuntimeContext } from "./policyContext";
 import { logAuditEvent } from "../ledger/auditLog";
 
 const pool = new Pool();
 
 async function interveneOnBatch(batchName: string) {
-  
-
   const diagnosesResult = await pool.query(
     `SELECT d.id AS diagnosis_id, d.event_id, d.root_cause, d.confidence
      FROM diagnoses d
@@ -20,33 +19,31 @@ async function interveneOnBatch(batchName: string) {
   for (const row of diagnosesResult.rows) {
     const already = await pool.query("SELECT id FROM interventions WHERE diagnosis_id = $1", [row.diagnosis_id]);
     if (already.rows.length > 0) {
-    console.log(`Skipping ${row.event_id} — already has an intervention.`);
-    continue;
+      console.log(`Skipping ${row.event_id} — already has an intervention.`);
+      continue;
     }
-    const customerFailureCount = 0;
-    const customerContactedInLast24h = false;
 
+    const runtime = await getPolicyRuntimeContext(row.event_id);
     const intervention = await chooseAction({
       rootCause: row.root_cause,
       confidence: parseFloat(row.confidence),
-      customerFailureCount,
+      customerFailureCount: runtime.customerFailureCount,
     });
 
-    await logAuditEvent(row.event_id, "intervention_chosen", {
-      chosen_action: intervention.chosen_action,
-      reasoning: intervention.reasoning,
-    });
+    await logAuditEvent(row.event_id, "intervention_chosen", { chosen_action: intervention.chosen_action, reasoning: intervention.reasoning });
 
     const policyOutcome = applyPolicyGate({
       chosenAction: intervention.chosen_action,
-      customerFailureCount,
-      customerContactedInLast24h,
+      automatedRecoveryAttemptCount: runtime.automatedRecoveryAttemptCount,
+      customerContactedInLast24h: runtime.customerContactedInLast24h,
+      paymentAlreadyRecovered: runtime.paymentAlreadyRecovered,
     });
 
     await logAuditEvent(row.event_id, "policy_check", {
       result: policyOutcome.result,
       reason: policyOutcome.reason,
       finalAction: policyOutcome.finalAction,
+      runtime,
     });
 
     await pool.query(

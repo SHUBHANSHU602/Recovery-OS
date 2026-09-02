@@ -1,17 +1,20 @@
 {
-  "compilerOptions": {
-    "target": "ES2020",
-    "module": "CommonJS",
-    "moduleResolution": "node",
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "strict": true,
-    "outDir": "dist",
-    "rootDir": "src"
+  "name": "recovery-os",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Closed-loop, policy-gated revenue recovery system for Razorpay Track 3.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "start": "tsx src/ingestion/server.ts",
+    "db:migrate": "tsx src/db/migrate.ts",
+    "evaluate": "tsx src/evaluation/runEvaluation.ts",
+    "test:policy": "tsx src/policy/testPolicyGate.ts",
+    "test:verifier": "tsx src/verifier/testVerifier.ts",
+    "test:core": "npm run typecheck && npm run test:policy && npm run test:verifier"
   },
-  "include": [
-    "src/**/*"
-  ],
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "dotenv": "^17.4.2",

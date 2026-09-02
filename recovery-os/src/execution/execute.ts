@@ -3,7 +3,8 @@ import { Pool } from "pg";
 import { logAuditEvent } from "../ledger/auditLog";
 import { startOutboundRecoveryMessage } from "../agent/conversationalAgent";
 import { recordOutboundContact, requestPaymentLink } from "./actionService";
-import { ensureRecoveryCase, ensureTrack3Schema, setRecoveryState } from "../recovery/recoveryStore";
+import { scheduleBackoffRetry } from "./scheduledActions";
+import { createHumanEscalation, ensureRecoveryCase, ensureTrack3Schema, setRecoveryState } from "../recovery/recoveryStore";
 
 const pool = new Pool();
 
@@ -30,12 +31,26 @@ export async function executeAction(context: ExecutionContext): Promise<void> {
     return;
   }
 
-  if (context.finalAction === "retry_now" || context.finalAction === "retry_with_backoff") {
-    const result = await requestPaymentLink(context.eventId, context.finalAction, context.interventionId);
+  if (context.finalAction === "retry_now") {
+    const result = await requestPaymentLink(
+      context.eventId,
+      "retry_now",
+      context.interventionId,
+      `${context.eventId}_retry_now_attempt_1`
+    );
     await logAuditEvent(context.eventId, "execution_result", {
       interventionId: context.interventionId,
       finalAction: context.finalAction,
       result,
+    });
+    return;
+  }
+
+  if (context.finalAction === "retry_with_backoff") {
+    await scheduleBackoffRetry(context.eventId, context.interventionId);
+    await logAuditEvent(context.eventId, "execution_scheduled", {
+      interventionId: context.interventionId,
+      finalAction: context.finalAction,
     });
     return;
   }
@@ -57,7 +72,7 @@ export async function executeAction(context: ExecutionContext): Promise<void> {
 
   if (context.finalAction === "escalate_to_human") {
     const caseId = await ensureRecoveryCase(pool, context.eventId);
-    if (caseId) await setRecoveryState(pool, caseId, "ESCALATED", { terminalReason: "policy_or_agent_escalation" });
+    if (caseId) await createHumanEscalation(pool, caseId, context.eventId, "policy_or_agent_escalation");
     await logAuditEvent(context.eventId, "execution_requires_human", {
       interventionId: context.interventionId,
       finalAction: context.finalAction,

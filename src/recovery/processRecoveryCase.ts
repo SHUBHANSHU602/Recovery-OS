@@ -66,18 +66,50 @@ export async function processRecoveryCase(eventId: string): Promise<void> {
     if (interventionRow.rows.length === 0) {
       const eventResult = await pool.query("SELECT payload FROM events WHERE event_id = $1", [eventId]);
       const payment = eventResult.rows[0].payload.payload.payment.entity;
-      const policyContext = await loadPolicyContext(pool, { eventId, customerEmail: payment.email ?? "" });
+      const customerEmail = String(payment.email ?? "");
+      const policyContext = await loadPolicyContext(pool, { eventId, customerEmail });
+      const priorRecoveryResult = customerEmail
+        ? await pool.query(
+            `SELECT strategy, status, recovered_amount
+             FROM recovery_cases
+             WHERE customer_email = $1
+               AND original_event_id <> $2
+             ORDER BY updated_at DESC
+             LIMIT 5`,
+            [customerEmail, eventId]
+          )
+        : { rows: [] as any[] };
+
       const chosen = await chooseAction({
         rootCause: diagnosis.root_cause,
         confidence: Number(diagnosis.confidence),
         customerFailureCount: evidence.customerFailureCount,
+        amountAtRisk: evidence.amount,
+        correlatedFailuresAtSameBank: evidence.correlatedFailuresAtSameBank,
+        automatedRetryCount: policyContext.automatedRetryCount,
+        contactsLast24h: policyContext.contactsLast24h,
+        priorRecoveryOutcomes: priorRecoveryResult.rows.map((row: any) => ({
+          strategy: row.strategy == null ? null : String(row.strategy),
+          status: String(row.status),
+          recoveredAmount: Number(row.recovered_amount ?? 0),
+        })),
       });
       await setRecoveryState(pool, caseId, "ACTION_CHOSEN", { strategy: chosen.chosen_action });
       const policy = applyPolicyGate({ chosenAction: chosen.chosen_action, ...policyContext });
       await setRecoveryState(pool, caseId, policy.result === "APPROVED" ? "POLICY_APPROVED" : "POLICY_BLOCKED", {
         terminalReason: policy.result === "APPROVED" ? undefined : policy.reason,
       });
-      await logAuditEvent(eventId, "policy_check", { chosen, policyContext, policy, customerFailureCount: evidence.customerFailureCount });
+      await logAuditEvent(eventId, "policy_check", {
+        chosen,
+        policyContext,
+        policy,
+        decisionContext: {
+          customerFailureCount: evidence.customerFailureCount,
+          amountAtRisk: evidence.amount,
+          correlatedFailuresAtSameBank: evidence.correlatedFailuresAtSameBank,
+          priorRecoveryOutcomes: priorRecoveryResult.rows,
+        },
+      });
       interventionRow = await pool.query(
         `INSERT INTO interventions (diagnosis_id, chosen_action, reasoning, policy_check_result, final_action)
          VALUES ($1, $2, $3, $4, $5) RETURNING id, final_action`,

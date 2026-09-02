@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { Pool } from "pg";
 import { logAuditEvent } from "../ledger/auditLog";
-import { runAgentTurn } from "../agent/conversationalAgent";
+import { startConversation } from "../agent/conversationalAgent";
 
 const pool = new Pool();
 
@@ -68,7 +68,7 @@ export async function executeAction(context: ExecutionContext): Promise<void> {
   if (context.finalAction === "whatsapp_nudge" || context.finalAction === "offer_alternate_payment_method") {
     try {
       const opening = OPENING_MESSAGES[context.finalAction];
-      const agentReply = await runAgentTurn(context.eventId, context.customerEmail, context.amount, opening);
+      const agentReply = await startConversation(context.eventId, context.customerEmail, context.amount, opening);
 
       await pool.query(
         "INSERT INTO actions (intervention_id, razorpay_api_call, idempotency_key, status, response) VALUES ($1, $2, $3, $4, $5)",

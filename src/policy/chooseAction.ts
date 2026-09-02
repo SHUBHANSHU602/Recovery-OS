@@ -16,10 +16,19 @@ interface Intervention {
   reasoning: string;
 }
 
-interface ActionContext {
+export interface ActionContext {
   rootCause: string;
   confidence: number;
-  customerFailureCount: number; // how many times this customer has failed before, total
+  customerFailureCount: number;
+  amountAtRisk: number;
+  correlatedFailuresAtSameBank: number;
+  automatedRetryCount: number;
+  contactsLast24h: number;
+  priorRecoveryOutcomes: Array<{
+    strategy: string | null;
+    status: string;
+    recoveredAmount: number;
+  }>;
 }
 
 const ACTION_TOOL = {
@@ -37,7 +46,7 @@ const ACTION_TOOL = {
         },
         reasoning: {
           type: "string",
-          description: "Why this action fits the root cause and the customer's prior attempt history.",
+          description: "Why this action fits the diagnosis, customer context, prior outcomes, and current recovery constraints.",
         },
       },
       required: ["chosen_action", "reasoning"],
@@ -51,21 +60,32 @@ export async function chooseAction(context: ActionContext): Promise<Intervention
   }
 
   const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+  const priorOutcomes = context.priorRecoveryOutcomes.length
+    ? context.priorRecoveryOutcomes
+        .map((item) => `${item.strategy ?? "unknown"}: ${item.status}, recovered ${item.recoveredAmount} paise`)
+        .join("; ")
+    : "none";
 
-  const prompt = `A payment failed and was diagnosed. Choose the best recovery action from the fixed menu.
+  const prompt = `A payment failed and was diagnosed. Choose one recovery action from the fixed approved menu.
 
-Root cause: ${context.rootCause}
-Diagnosis confidence: ${context.confidence}
-This customer's total prior failed-payment attempts: ${context.customerFailureCount}
+Current case:
+- Root cause: ${context.rootCause}
+- Diagnosis confidence: ${context.confidence}
+- Amount at risk: ${context.amountAtRisk} paise
+- Customer's prior failed-payment count: ${context.customerFailureCount}
+- Other failures at the same bank in the evidence window: ${context.correlatedFailuresAtSameBank}
+- Automated recovery attempts already made for this case: ${context.automatedRetryCount}
+- Recovery contacts sent to this customer in the last 24h: ${context.contactsLast24h}
+- Prior recovery outcomes for this customer: ${priorOutcomes}
 
-Guidance:
-- systemic_bank_outage -> usually retry_with_backoff (the bank issue may resolve shortly; retrying immediately is pointless).
-- expired_card -> usually offer_alternate_payment_method (retrying won't help, the card itself is the problem) or whatsapp_nudge to get updated card details.
-- insufficient_funds -> usually whatsapp_nudge or retry_with_backoff (funds may become available later).
-- ambiguous -> usually escalate_to_human, since we don't have a confident enough diagnosis to act automatically.
-- If this customer has already failed many times before, prefer escalate_to_human over another automated attempt -- repeated automated retries on a customer who keeps failing is poor practice, not persistence.
+Reason over the whole context rather than applying a one-to-one root-cause lookup. Examples of trade-offs:
+- A systemic outage usually favors delayed retry, but repeated failed recovery attempts should push toward escalation.
+- An expired card usually needs an alternate method or customer interaction, but recent contact limits and prior failed outreach matter.
+- Insufficient funds may justify waiting or a nudge; repeated historical failures and high-value cases can justify human review sooner.
+- Ambiguous diagnoses should generally be escalated rather than acted on confidently.
+- Do not try to bypass policy limits. The deterministic policy gate will independently enforce them after your recommendation.
 
-Call choose_action with your decision.`;
+Call choose_action with the single best recommendation and concise reasoning.`;
 
   const response = await groq.chat.completions.create({
     model: "openai/gpt-oss-120b",
@@ -75,9 +95,7 @@ Call choose_action with your decision.`;
   });
 
   const toolCall = response.choices[0]?.message?.tool_calls?.[0];
-  if (!toolCall) {
-    throw new Error("Model did not return a tool call");
-  }
+  if (!toolCall) throw new Error("Model did not return a tool call");
 
   return JSON.parse(toolCall.function.arguments) as Intervention;
 }

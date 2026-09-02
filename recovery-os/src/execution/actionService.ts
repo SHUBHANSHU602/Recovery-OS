@@ -3,7 +3,7 @@ import { Pool } from "pg";
 import type { Action } from "../policy/chooseAction";
 import { applyPolicyGate } from "../policy/policyGate";
 import { loadPolicyContext } from "../policy/policyContext";
-import { ensureRecoveryCase, ensureTrack3Schema, isRecoveryTerminal, setRecoveryState } from "../recovery/recoveryStore";
+import { createHumanEscalation, ensureRecoveryCase, ensureTrack3Schema, isRecoveryTerminal, setRecoveryState } from "../recovery/recoveryStore";
 import { logAuditEvent } from "../ledger/auditLog";
 
 const pool = new Pool();
@@ -13,6 +13,7 @@ export interface ActionServiceResult {
   reason?: string;
   shortUrl?: string | null;
   razorpayStatus?: number;
+  retryAfterSeconds?: number | null;
 }
 
 async function trustedEventContext(eventId: string) {
@@ -23,10 +24,20 @@ async function trustedEventContext(eventId: string) {
   return { customerEmail: String(payment.email ?? ""), amount: Number(payment.amount ?? 0) };
 }
 
+function parseRetryAfterSeconds(value: string | null): number | null {
+  if (!value) return null;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric >= 0) return Math.ceil(numeric);
+  const when = Date.parse(value);
+  if (Number.isNaN(when)) return null;
+  return Math.max(0, Math.ceil((when - Date.now()) / 1000));
+}
+
 export async function requestPaymentLink(
   eventId: string,
   desiredAction: Action,
-  interventionId: number | null = null
+  interventionId: number | null = null,
+  executionKey?: string
 ): Promise<ActionServiceResult> {
   await ensureTrack3Schema(pool);
   const trusted = await trustedEventContext(eventId);
@@ -39,15 +50,19 @@ export async function requestPaymentLink(
 
   const policyContext = await loadPolicyContext(pool, { eventId, customerEmail: trusted.customerEmail });
   const policy = applyPolicyGate({ chosenAction: desiredAction, ...policyContext });
-  await logAuditEvent(eventId, "action_service_policy", { desiredAction, policyContext, policy });
+  await logAuditEvent(eventId, "action_service_policy", { desiredAction, policyContext, policy, executionKey });
   if (policy.result !== "APPROVED") {
-    await setRecoveryState(pool, caseId, policy.finalAction === "stop" ? "STOPPED" : "ESCALATED", {
-      terminalReason: policy.reason,
-    });
+    if (policy.finalAction === "stop") {
+      await setRecoveryState(pool, caseId, "STOPPED", { terminalReason: policy.reason });
+    } else {
+      await createHumanEscalation(pool, caseId, eventId, policy.reason);
+    }
     return { status: "blocked", reason: policy.reason };
   }
 
-  const idempotencyKey = `${eventId}_${desiredAction}`;
+  // Idempotency belongs to a concrete execution attempt, not merely to the action name.
+  // This allows retry attempt #2 while still preventing duplicate execution of attempt #2.
+  const idempotencyKey = executionKey ?? `${eventId}_${desiredAction}_attempt_1`;
   const claim = await pool.query(
     `INSERT INTO actions (intervention_id, razorpay_api_call, idempotency_key, status, response)
      VALUES ($1, 'payment_links.create', $2, 'pending', '{}'::jsonb)
@@ -60,7 +75,7 @@ export async function requestPaymentLink(
     const existing = await pool.query("SELECT status, response FROM actions WHERE idempotency_key = $1", [idempotencyKey]);
     return {
       status: "duplicate",
-      reason: `Action already claimed (${existing.rows[0]?.status ?? "unknown"}).`,
+      reason: `Action attempt already claimed (${existing.rows[0]?.status ?? "unknown"}).`,
       shortUrl: existing.rows[0]?.response?.short_url ?? null,
     };
   }
@@ -79,12 +94,19 @@ export async function requestPaymentLink(
         notify: { sms: false, email: false },
       }),
     });
-    const body: any = await response.json();
+    const raw = await response.text();
+    let body: any = {};
+    try {
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
+      body = { raw };
+    }
     const success = response.ok;
+    const retryAfterSeconds = parseRetryAfterSeconds(response.headers.get("retry-after"));
     await pool.query("UPDATE actions SET status = $2, response = $3 WHERE id = $1", [
       actionId,
       success ? "success" : "failed",
-      JSON.stringify(body),
+      JSON.stringify({ ...body, retryAfterSeconds }),
     ]);
 
     if (success && body.id) {
@@ -97,17 +119,25 @@ export async function requestPaymentLink(
     }
     await logAuditEvent(eventId, "action_service_execution", {
       desiredAction,
+      executionKey: idempotencyKey,
       actionId,
       razorpayStatus: response.status,
+      retryAfterSeconds,
       paymentLinkId: body.id ?? null,
     });
-    return { status: success ? "executed" : "failed", shortUrl: body.short_url ?? null, razorpayStatus: response.status };
+    return {
+      status: success ? "executed" : "failed",
+      shortUrl: body.short_url ?? null,
+      razorpayStatus: response.status,
+      retryAfterSeconds,
+      reason: success ? undefined : (body?.error?.description ?? body?.error?.reason ?? `Razorpay returned HTTP ${response.status}`),
+    };
   } catch (error: any) {
     await pool.query("UPDATE actions SET status = 'error', response = $2 WHERE id = $1", [
       actionId,
       JSON.stringify({ error: error.message }),
     ]);
-    await logAuditEvent(eventId, "action_service_error", { desiredAction, actionId, error: error.message });
+    await logAuditEvent(eventId, "action_service_error", { desiredAction, executionKey: idempotencyKey, actionId, error: error.message });
     return { status: "failed", reason: error.message };
   }
 }
@@ -121,12 +151,18 @@ export async function recordOutboundContact(
   const trusted = await trustedEventContext(eventId);
   const caseId = await ensureRecoveryCase(pool, eventId);
   if (!caseId) throw new Error(`Unable to create recovery case for ${eventId}`);
+  if (await isRecoveryTerminal(pool, eventId)) return { status: "blocked", reason: "Recovery case is terminal." };
+
   const policyContext = await loadPolicyContext(pool, { eventId, customerEmail: trusted.customerEmail });
   const policy = applyPolicyGate({ chosenAction: desiredAction, ...policyContext });
   await logAuditEvent(eventId, "action_service_policy", { desiredAction, policyContext, policy });
-  if (policy.result !== "APPROVED") return { status: "blocked", reason: policy.reason };
+  if (policy.result !== "APPROVED") {
+    if (policy.finalAction === "stop") await setRecoveryState(pool, caseId, "STOPPED", { terminalReason: policy.reason });
+    else await createHumanEscalation(pool, caseId, eventId, policy.reason);
+    return { status: "blocked", reason: policy.reason };
+  }
 
-  const idempotencyKey = `${eventId}_${desiredAction}`;
+  const idempotencyKey = `${eventId}_${desiredAction}_contact_1`;
   const claim = await pool.query(
     `INSERT INTO actions (intervention_id, razorpay_api_call, idempotency_key, status, response)
      VALUES (NULL, 'outbound_contact', $1, 'pending', '{}'::jsonb)

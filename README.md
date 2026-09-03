@@ -276,14 +276,8 @@ A Razorpay **Test Mode** Payment Link created by Recovery OS was successfully pa
 | Terminal reason recorded as `trusted_payment_link_paid` | ✅ |
 
 ### Runtime proof screenshot
+<img width="687" height="202" alt="image" src="https://github.com/user-attachments/assets/db252e66-9d21-4fc9-a513-7f3f41428338" />
 
-> **ADD SCREENSHOT HERE BEFORE MERGING**
->
-> Suggested repo path: `docs/evidence/provider-confirmed-recovery.png`
->
-> After adding the image, replace this placeholder with:
->
-> `![Provider-confirmed Razorpay Test Mode recovery](docs/evidence/provider-confirmed-recovery.png)`
 
 > **Note:** Razorpay Test Mode uses simulated funds. The ₹703.51 result demonstrates provider-confirmed end-to-end recovery behavior, not production monetary revenue.
 

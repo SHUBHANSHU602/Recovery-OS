@@ -4,6 +4,16 @@ import { ensureTrack3Schema } from "../recovery/recoveryStore";
 
 const pool = new Pool();
 
+function isTrustedRecoveredCase(row: any): boolean {
+  return (
+    row.status === "RECOVERED" &&
+    Number(row.recovered_amount ?? 0) > 0 &&
+    row.recovered_at != null &&
+    row.razorpay_payment_link_id != null &&
+    row.terminal_reason === "trusted_payment_link_paid"
+  );
+}
+
 async function runEvaluation(batchName: string) {
   await ensureTrack3Schema(pool);
   console.log(`\n========== EVALUATION: ${batchName} ==========\n`);
@@ -26,9 +36,7 @@ async function runEvaluation(batchName: string) {
   console.log(`Intervened on ${verifierInterventions}/${totalDiagnoses} diagnoses.\n`);
 
   const batchCountResult = await pool.query(
-    `SELECT COUNT(*)
-     FROM recovery_batches
-     WHERE batch_name = $1`,
+    `SELECT COUNT(*) FROM recovery_batches WHERE batch_name = $1`,
     [batchName]
   );
   const batchEventCount = Number(batchCountResult.rows[0]?.count ?? 0);
@@ -46,19 +54,24 @@ async function runEvaluation(batchName: string) {
 
   console.log(`--- Recovery-Case Coverage ---`);
   console.log(`${cases.length}/${batchEventCount} batch event(s) have durable recovery cases.`);
+
   if (!recoveryCoverageComplete) {
-    console.log(
-      `Revenue recovery rates are NOT reported because the batch has not been fully materialized into recovery cases.`
-    );
-    console.log(`Run the batch execution path first so amount-at-risk comes from the stored payment events.\n`);
+    console.log(`Revenue recovery rates are NOT reported because recovery-case coverage is incomplete.`);
+    console.log(`Run \`npm run evaluate:prepare\` first so amount-at-risk is derived from the stored payment events.\n`);
   } else {
     const atRisk = cases.reduce((sum, row) => sum + Number(row.amount_at_risk ?? 0), 0);
-    const recovered = cases.reduce((sum, row) => sum + Number(row.recovered_amount ?? 0), 0);
-    const recoveredTransactions = cases.filter(
-      (row) => row.status === "RECOVERED" && Number(row.recovered_amount ?? 0) > 0 && row.recovered_at != null
-    ).length;
+    const trustedRecoveredCases = cases.filter(isTrustedRecoveredCase);
+    const recovered = trustedRecoveredCases.reduce(
+      (sum, row) => sum + Math.min(Number(row.amount_at_risk ?? 0), Number(row.recovered_amount ?? 0)),
+      0
+    );
+    const recoveredTransactions = trustedRecoveredCases.length;
     const valueRecoveryRate = atRisk ? (recovered / atRisk) * 100 : 0;
     const transactionRecoveryRate = cases.length ? (recoveredTransactions / cases.length) * 100 : 0;
+
+    const suspiciousRecoveredRows = cases.filter(
+      (row) => row.status === "RECOVERED" && !isTrustedRecoveredCase(row)
+    );
 
     console.log(`--- Confirmed Revenue Recovery ---`);
     console.log(`Revenue at risk: ₹${(atRisk / 100).toFixed(2)}`);
@@ -66,17 +79,27 @@ async function runEvaluation(batchName: string) {
     console.log(`Value recovery rate: ${valueRecoveryRate.toFixed(1)}%`);
     console.log(`Transaction recovery rate: ${recoveredTransactions}/${cases.length} (${transactionRecoveryRate.toFixed(1)}%)`);
     console.log(`Unresolved amount: ₹${((atRisk - recovered) / 100).toFixed(2)}`);
-    console.log(`A case counts as recovered only after persisted trusted outcome state, never from action/API success.\n`);
+    console.log(
+      `Trusted recovery requires RECOVERED state + positive recovered amount + recovered_at + Razorpay payment-link id + trusted_payment_link_paid terminal reason.`
+    );
+    if (suspiciousRecoveredRows.length > 0) {
+      console.log(`WARNING: ${suspiciousRecoveredRows.length} RECOVERED row(s) were excluded because trusted outcome evidence was incomplete.`);
+    }
+    console.log();
 
     const strategy = new Map<string, { cases: number; recoveredCases: number; recoveredAmount: number }>();
     for (const row of cases) {
       const key = String(row.strategy ?? "unassigned");
       const current = strategy.get(key) ?? { cases: 0, recoveredCases: 0, recoveredAmount: 0 };
+      const trusted = isTrustedRecoveredCase(row);
       current.cases += 1;
-      current.recoveredCases += row.status === "RECOVERED" && Number(row.recovered_amount ?? 0) > 0 ? 1 : 0;
-      current.recoveredAmount += Number(row.recovered_amount ?? 0);
+      current.recoveredCases += trusted ? 1 : 0;
+      current.recoveredAmount += trusted
+        ? Math.min(Number(row.amount_at_risk ?? 0), Number(row.recovered_amount ?? 0))
+        : 0;
       strategy.set(key, current);
     }
+
     console.log(`--- Recovery by Strategy ---`);
     for (const [name, metrics] of strategy.entries()) {
       console.log(`${name}: ${metrics.recoveredCases}/${metrics.cases} recovered, ₹${(metrics.recoveredAmount / 100).toFixed(2)}`);
@@ -84,7 +107,6 @@ async function runEvaluation(batchName: string) {
     console.log();
   }
 
-  // Match all concrete attempt/contact keys for batch events, not one legacy exact key shape.
   const actionsResult = await pool.query(
     `SELECT DISTINCT a.id, a.status
      FROM actions a

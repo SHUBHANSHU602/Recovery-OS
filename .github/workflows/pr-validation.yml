@@ -1,0 +1,80 @@
+name: PR validation
+
+on:
+  push:
+    branches:
+      - track3-hardening-p1
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: recovery_os
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d recovery_os"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/recovery_os
+      RAZORPAY_KEY_ID: test_key
+      RAZORPAY_KEY_SECRET: test_secret
+      RAZORPAY_WEBHOOK_SECRET: test_webhook_secret
+      GROQ_API_KEY: test_groq_key
+      RECOVERY_WORKER_POLL_MS: 1000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Apply migrations
+        run: npm run db:migrate
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Deterministic core tests
+        run: npm run test:core
+
+      - name: Smoke-test server and background worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm start > server.log 2>&1 &
+          pid=$!
+          sleep 8
+
+          if ! kill -0 "$pid" 2>/dev/null; then
+            cat server.log
+            echo "Server exited during smoke test"
+            exit 1
+          fi
+
+          if grep -E "Recovery worker (startup|poll) failed|Server listening.*failed|Unhandled|uncaught" server.log; then
+            cat server.log
+            echo "Worker/server emitted an error during smoke test"
+            kill "$pid" || true
+            exit 1
+          fi
+
+          kill "$pid"
+          wait "$pid" || true
+          cat server.log

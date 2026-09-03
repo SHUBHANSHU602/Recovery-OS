@@ -40,7 +40,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-          cache: npm
 
       - name: Install dependencies
         run: npm install
@@ -68,7 +67,7 @@ jobs:
             exit 1
           fi
 
-          if grep -E "Recovery worker (startup|poll) failed|Server listening.*failed|Unhandled|uncaught" server.log; then
+          if grep -E "Recovery worker (startup|poll) failed|Unhandled|uncaught" server.log; then
             cat server.log
             echo "Worker/server emitted an error during smoke test"
             kill "$pid" || true

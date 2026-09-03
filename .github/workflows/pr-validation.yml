@@ -27,7 +27,11 @@ jobs:
           --health-retries=10
 
     env:
-      DATABASE_URL: postgres://postgres:postgres@localhost:5432/recovery_os
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: recovery_os
       RAZORPAY_KEY_ID: test_key
       RAZORPAY_KEY_SECRET: test_secret
       RAZORPAY_WEBHOOK_SECRET: test_webhook_secret

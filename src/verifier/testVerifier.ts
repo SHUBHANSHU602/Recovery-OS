@@ -10,17 +10,16 @@ const isolatedEvidence: EvidenceBundle = {
   bank: "HDFC",
   amount: 33447,
   customerFailureCount: 0,
-  correlatedFailuresAtSameBank: 0, // key fact: genuinely isolated
+  correlatedFailuresAtSameBank: 0,
+  evidenceCutoffAt: "2026-09-01T10:00:00.000Z",
 };
 
-// A deliberately WRONG diagnosis -- claims systemic outage despite zero correlated evidence
 const badDiagnosis = {
   root_cause: "systemic_bank_outage",
-  rationale: "This looks like a bank-wide issue.", // unsupported by the actual evidence
+  rationale: "This looks like a bank-wide issue.",
   confidence: 0.85,
 };
 
-// A CORRECT diagnosis over the same evidence, for contrast
 const goodDiagnosis = {
   root_cause: "expired_card",
   rationale: "Card has expired, and there's no correlated failure pattern.",
@@ -33,7 +32,6 @@ console.log(verify(badDiagnosis, isolatedEvidence));
 console.log("\n=== Test 2: Correct diagnosis over the same evidence ===");
 console.log(verify(goodDiagnosis, isolatedEvidence));
 
-// A real systemic case (from batch_1's AXIS cluster) -- verifier should PASS this one
 const outageEvidence: EvidenceBundle = {
   eventId: "test_outage",
   errorCode: "GATEWAY_ERROR",
@@ -42,7 +40,8 @@ const outageEvidence: EvidenceBundle = {
   bank: "AXIS",
   amount: 91355,
   customerFailureCount: 0,
-  correlatedFailuresAtSameBank: 3, // real cluster
+  correlatedFailuresAtSameBank: 3,
+  evidenceCutoffAt: "2026-09-01T10:30:00.000Z",
 };
 
 const correctOutageDiagnosis = {
@@ -54,11 +53,10 @@ const correctOutageDiagnosis = {
 console.log("\n=== Test 3: Correct systemic_bank_outage claim WITH real supporting evidence ===");
 console.log(verify(correctOutageDiagnosis, outageEvidence));
 
-// Malformed confidence
 const malformedDiagnosis = {
   root_cause: "expired_card",
   rationale: "Card expired.",
-  confidence: 1.5, // invalid -- outside 0-1
+  confidence: 1.5,
 };
 
 console.log("\n=== Test 4: Malformed confidence value (1.5, outside 0-1 range) ===");

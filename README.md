@@ -57,6 +57,16 @@ Recovery OS keeps one `recovery_cases` row per original failed transaction and r
 
 Only a trusted `payment_link.paid` webhook can move an open case to `RECOVERED` and increase `recovered_amount`.
 
+A case is counted as confirmed recovered only when the persisted outcome has all of the trusted recovery evidence:
+
+- `status = RECOVERED`
+- `recovered_amount > 0`
+- `recovered_at IS NOT NULL`
+- `razorpay_payment_link_id IS NOT NULL`
+- `terminal_reason = trusted_payment_link_paid`
+
+This prevents API success, Payment Link creation, or a manual state change from being misreported as recovered money.
+
 ### 2. Webhooks are authenticated and retry-safe
 
 The Razorpay webhook route:
@@ -110,6 +120,8 @@ The worker:
 - stops at the configured retry cap, and
 - creates a durable human-escalation item when automated recovery is exhausted or unsafe.
 
+Runtime schema initialization is serialized and guarded with a PostgreSQL advisory lock, and worker polling is non-overlapping so concurrent workers do not race on schema/catalog updates.
+
 ### 6. Idempotency is per execution attempt
 
 The original implementation discovered a real test-mode duplicate-link bug because the idempotency key was tied to a database row ID instead of stable work identity.
@@ -157,7 +169,7 @@ ORDER BY created_at;
 
 The synthetic batch contains both clear controls and deliberately context-dependent cases.
 
-Several events now use the **same** outward signal:
+Several events use the **same** outward signal:
 
 ```text
 GATEWAY_ERROR
@@ -168,9 +180,80 @@ An isolated occurrence is labeled `ambiguous`. Later occurrences at the same ban
 
 This makes an error-code lookup table insufficient and prevents future-information leakage from inflating diagnosis accuracy.
 
-The evaluator reports diagnosis accuracy, verifier interventions, confirmed recovered revenue, transaction/value recovery, execution reliability, false escalation rate, recovery by strategy, and durable human-escalation count.
+Before calculating business recovery rates, the evaluator checks that every event in the evaluation batch has a durable `recovery_case`. If coverage is incomplete, it reports that recovery has **not yet been evaluated** instead of printing a misleading `0/0 = 0%` result.
 
-Because the evaluation labels and recovery accounting were hardened, **old headline numbers such as 96% diagnosis accuracy and 67.6% "recovery" are intentionally not carried forward**. Run the current evaluator against the current schema/data before publishing new metrics.
+Prepare the batch first:
+
+```bash
+npm run evaluate:prepare
+```
+
+This creates recovery cases from the stored payment events and executes the already-selected recovery actions through the real execution paths. It does **not** mark anything recovered.
+
+Then evaluate persisted outcomes:
+
+```bash
+npm run evaluate
+```
+
+## Validated evaluation results — 2026-09-03
+
+The current hardened evaluator was run locally after a successful dependency install and schema migration, with all 25 batch events materialized into durable recovery cases.
+
+| Metric | Validated result |
+|---|---:|
+| Diagnosis accuracy | **24/25 (96.0%)** |
+| Verifier interventions | **0/25** |
+| Recovery-case coverage | **25/25** |
+| Revenue at risk | **₹14,960.69** |
+| Confirmed recovered revenue | **₹0.00** |
+| Value recovery rate | **0.0%** |
+| Transaction recovery rate | **0/25 (0.0%)** |
+| Unresolved amount | **₹14,960.69** |
+| Execution reliability | **34/45 recorded actions succeeded (75.6%)** |
+| False-escalation rate | **0/25 (0.0%)** |
+| Durable human-escalation work items | **6** |
+
+### Recovery by strategy
+
+| Strategy | Confirmed recovered |
+|---|---:|
+| `whatsapp_nudge` | 0/5 — ₹0.00 |
+| `retry_with_backoff` | 0/8 — ₹0.00 |
+| `offer_alternate_payment_method` | 0/6 — ₹0.00 |
+| `unassigned` | 0/6 — ₹0.00 |
+
+### Why confirmed recovery is currently ₹0.00
+
+This result is intentional and outcome-backed, not a hardcoded failure or an inflated success metric.
+
+The evaluated batch had **no persisted trusted `payment_link.paid` outcome** satisfying the confirmed-recovery contract. Recovery OS therefore reports ₹0.00 recovered even though many execution actions completed successfully.
+
+That distinction is deliberate:
+
+```text
+Payment Link/API success  ≠  recovered revenue
+trusted payment_link.paid = confirmed recovered revenue
+```
+
+A future Razorpay Test Mode recovery payment that reaches the authenticated `payment_link.paid` webhook will transition the matching case to `RECOVERED` and only then increase the evaluator's confirmed recovered revenue.
+
+## Validated runtime checks
+
+The hardened flow has also been exercised locally with:
+
+- fresh `npm install` — 103 packages audited, 0 reported vulnerabilities
+- ordered migrations — `001_base_schema.sql` and `002_track3_hardening.sql` applied successfully
+- TypeScript typecheck passing
+- deterministic policy tests passing
+- deterministic verifier tests passing
+- signed webhook simulation returning `200 OK`
+- durable retry scheduling with attempt #2 and attempt #3
+- retry exhaustion transitioning the recovery case to `ESCALATED`
+- durable `human_escalations` work-item creation
+- server and background worker startup with non-overlapping polling
+
+These checks validate execution and state transitions, but the business recovery metric remains intentionally stricter: only a trusted paid outcome counts as money recovered.
 
 ## Local setup
 
@@ -185,10 +268,7 @@ npm install
 npm run db:migrate
 npm run typecheck
 npm run test:core
-npm start
 ```
-
-The dependency versions in `package.json` are pinned. Generate and commit a fresh lockfile after the first validated local install; the stale pre-hardening lockfile was deliberately removed rather than left inconsistent with the repaired manifest.
 
 Fill these values in `.env` before exercising external integrations:
 
@@ -199,11 +279,20 @@ RAZORPAY_WEBHOOK_SECRET=
 GROQ_API_KEY=
 ```
 
-Run the evaluation with:
+Start the server/worker in one terminal:
 
 ```bash
+npm start
+```
+
+Prepare and evaluate the batch from another terminal:
+
+```bash
+npm run evaluate:prepare
 npm run evaluate
 ```
+
+The dependency versions in `package.json` are pinned. Generate and commit a fresh lockfile after the validated install so future environments can use the exact same dependency graph.
 
 ## Tech stack
 
@@ -239,6 +328,6 @@ DECISION.md       architecture decisions and trade-offs
 
 ## Engineering record
 
-The project deliberately keeps the debugging trail rather than presenting a fake "everything worked first try" story. `DEBUG.md` records genuine failures and their fixes, including the duplicate Payment Link bug, causal-evidence leakage, webhook-processing idempotency, retry-attempt identity, and transaction/pool mistakes found during hardening.
+The project deliberately keeps the debugging trail rather than presenting a fake "everything worked first try" story. `DEBUG.md` records genuine failures and their fixes, including the duplicate Payment Link bug, causal-evidence leakage, webhook-processing idempotency, retry-attempt identity, transaction/pool mistakes, environment/config mismatches, and worker/schema concurrency found during hardening.
 
 `DECISION.md` records the architectural decisions and trade-offs behind the current design.

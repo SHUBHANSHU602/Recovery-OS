@@ -108,7 +108,7 @@ It receives richer context than just the root cause: value at risk, prior failed
 
 ### 5. Backoff is real persisted work
 
-`retry_with_backoff` no longer means "create a link immediately." It creates a durable `scheduled_actions` row with a future `run_at`.
+`retry_with_backoff` creates a durable `scheduled_actions` row with a future `run_at`.
 
 The worker:
 
@@ -124,21 +124,9 @@ Runtime schema initialization is serialized and guarded with a PostgreSQL adviso
 
 ### 6. Idempotency is per execution attempt
 
-The original implementation discovered a real test-mode duplicate-link bug because the idempotency key was tied to a database row ID instead of stable work identity.
+The hardened design separates recovery strategy from logical execution attempt identity so concurrent duplicate execution of one attempt is blocked without accidentally blocking a legitimate later retry.
 
-The hardened design separates:
-
-```text
-recovery strategy
-        ↓
-logical attempt #1 / #2 / #3
-        ↓
-unique idempotency key for that exact attempt
-```
-
-That blocks concurrent duplicate execution of one attempt without accidentally blocking a legitimate later retry attempt.
-
-If a previous exact attempt is found in an ambiguous `pending` state after a crash, Recovery OS fails closed and escalates rather than blindly issuing another money-adjacent external call.
+If an exact attempt is found in an ambiguous `pending` state after a crash, Recovery OS fails closed and escalates rather than blindly issuing another money-adjacent external call.
 
 ### 7. Conversation tools use the same trust boundary
 
@@ -182,78 +170,160 @@ This makes an error-code lookup table insufficient and prevents future-informati
 
 Before calculating business recovery rates, the evaluator checks that every event in the evaluation batch has a durable `recovery_case`. If coverage is incomplete, it reports that recovery has **not yet been evaluated** instead of printing a misleading `0/0 = 0%` result.
 
-Prepare the batch first:
+Prepare and evaluate:
 
 ```bash
 npm run evaluate:prepare
-```
-
-This creates recovery cases from the stored payment events and executes the already-selected recovery actions through the real execution paths. It does **not** mark anything recovered.
-
-Then evaluate persisted outcomes:
-
-```bash
 npm run evaluate
 ```
 
 ## Validated evaluation results — 2026-09-03
 
-The current hardened evaluator was run locally after a successful dependency install and schema migration, with all 25 batch events materialized into durable recovery cases.
+The current hardened evaluator was run locally with all 25 `batch_1` events materialized into durable recovery cases. Revenue is counted as recovered only after a trusted Razorpay `payment_link.paid` outcome is processed.
+
+### Evaluation summary
 
 | Metric | Validated result |
 |---|---:|
+| Evaluation batch | `batch_1` |
+| Total payment events | **25** |
 | Diagnosis accuracy | **24/25 (96.0%)** |
 | Verifier interventions | **0/25** |
-| Recovery-case coverage | **25/25** |
+| Recovery-case coverage | **25/25 (100%)** |
 | Revenue at risk | **₹14,960.69** |
-| Confirmed recovered revenue | **₹0.00** |
-| Value recovery rate | **0.0%** |
-| Transaction recovery rate | **0/25 (0.0%)** |
-| Unresolved amount | **₹14,960.69** |
-| Execution reliability | **34/45 recorded actions succeeded (75.6%)** |
+| Provider-confirmed recovered revenue | **₹703.51** |
+| Value recovery rate | **4.7%** |
+| Transaction recovery rate | **1/25 (4.0%)** |
+| Unresolved amount | **₹14,257.18** |
 | False-escalation rate | **0/25 (0.0%)** |
-| Durable human-escalation work items | **6** |
 
 ### Recovery by strategy
 
-| Strategy | Confirmed recovered |
+| Strategy | Cases | Confirmed recoveries | Confirmed revenue |
+|---|---:|---:|---:|
+| `retry_with_backoff` | 8 | **1** | **₹703.51** |
+| `whatsapp_nudge` | 5 | 0 | ₹0.00 |
+| `offer_alternate_payment_method` | 6 | 0 | ₹0.00 |
+| `unassigned` | 6 | 0 | ₹0.00 |
+| **Total** | **25** | **1** | **₹703.51** |
+
+### Execution reliability
+
+| Execution metric | Result |
 |---|---:|
-| `whatsapp_nudge` | 0/5 — ₹0.00 |
-| `retry_with_backoff` | 0/8 — ₹0.00 |
-| `offer_alternate_payment_method` | 0/6 — ₹0.00 |
-| `unassigned` | 0/6 — ₹0.00 |
+| Total recorded execution attempts | **61** |
+| Successful attempts | **34** |
+| Unsuccessful attempts | **27** |
+| Razorpay `Too many requests` responses | **15** |
+| Razorpay Test Mode Payment Link limit responses | **12** |
+| Other / unexplained execution failures | **0** |
 
-### Why confirmed recovery is currently ₹0.00
+The raw execution result is **34/61 completed attempts**. All 27 unsuccessful attempts in this evaluation were attributable to Razorpay Test Mode quota/rate-limit responses; no additional internal execution-failure category was observed.
 
-This result is intentional and outcome-backed, not a hardcoded failure or an inflated success metric.
+### Razorpay Test Mode constraints observed during evaluation
 
-The evaluated batch had **no persisted trusted `payment_link.paid` outcome** satisfying the confirmed-recovery contract. Recovery OS therefore reports ₹0.00 recovered even though many execution actions completed successfully.
+| Constraint metric | Result |
+|---|---:|
+| Batch cases affected by Razorpay Test Mode quota/rate limits | **8/25** |
+| Batch cases unaffected by those limits | **17/25** |
+| Failed scheduled-action attempts inspected | **16** |
+| Scheduled failures caused by Razorpay Test Mode / rate limiting | **16/16** |
+| Other scheduled-action failure categories | **0** |
 
-That distinction is deliberate:
+### Human escalation breakdown
 
-```text
-Payment Link/API success  ≠  recovered revenue
-trusted payment_link.paid = confirmed recovered revenue
-```
+| Escalation reason | Count | Interpretation |
+|---|---:|---|
+| Customer already reached outbound-contact limit | **13** | Safety/policy enforcement |
+| Policy or agent escalation | **4** | Intentional human handoff |
+| Scheduled retry exhaustion | **7** | Includes cases affected by Razorpay Test Mode limits |
+| **Total durable escalation work items** | **24** | Mixed policy and execution outcomes |
 
-A future Razorpay Test Mode recovery payment that reaches the authenticated `payment_link.paid` webhook will transition the matching case to `RECOVERED` and only then increase the evaluator's confirmed recovered revenue.
+## Provider-confirmed closed-loop recovery proof
+
+A Razorpay **Test Mode** Payment Link created by Recovery OS was successfully paid for **₹703.51**. Razorpay delivered `payment_link.paid`, the webhook was processed successfully, and the corresponding recovery case transitioned to `RECOVERED`.
+
+### Outcome evidence
+
+| Recovery evidence | Observed value |
+|---|---|
+| Environment | Razorpay **Test Mode** |
+| Amount at risk | **₹703.51** |
+| Payment completed | **Yes** |
+| Webhook event | `payment_link.paid` |
+| Webhook processing status | **PROCESSED** |
+| Webhook processing attempts | **1** |
+| Webhook processing error | **None** |
+| Recovery-case state after provider outcome | **`RECOVERED`** |
+| Recovered amount | **₹703.51** |
+| Recovery strategy | `retry_with_backoff` |
+| Terminal reason | **`trusted_payment_link_paid`** |
+
+### Closed-loop verification
+
+| Stage | Verified outcome |
+|---|---|
+| Payment failure stored | ✅ |
+| Durable recovery case created | ✅ |
+| Recovery strategy selected | ✅ |
+| Razorpay Payment Link created | ✅ |
+| ₹703.51 Test Mode payment completed | ✅ |
+| Razorpay emitted `payment_link.paid` | ✅ |
+| Authenticated webhook processed | ✅ |
+| Payment Link correlated to recovery case | ✅ |
+| Case transitioned to `RECOVERED` | ✅ |
+| `recovered_amount` updated to ₹703.51 | ✅ |
+| Terminal reason recorded as `trusted_payment_link_paid` | ✅ |
+
+### Runtime proof screenshot
+
+> **ADD SCREENSHOT HERE BEFORE MERGING**
+>
+> Suggested repo path: `docs/evidence/provider-confirmed-recovery.png`
+>
+> After adding the image, replace this placeholder with:
+>
+> `![Provider-confirmed Razorpay Test Mode recovery](docs/evidence/provider-confirmed-recovery.png)`
+
+> **Note:** Razorpay Test Mode uses simulated funds. The ₹703.51 result demonstrates provider-confirmed end-to-end recovery behavior, not production monetary revenue.
+
+### Recovery integrity rule
+
+| Event / action | Counted as recovered revenue? |
+|---|---|
+| AI recommends retry | ❌ No |
+| Retry job scheduled | ❌ No |
+| Razorpay API request succeeds | ❌ No |
+| Payment Link is created | ❌ No |
+| Recovery message is sent | ❌ No |
+| Customer opens Payment Link | ❌ No |
+| Trusted Razorpay `payment_link.paid` is processed | ✅ **Yes** |
+
+A recovery is included in the business metric only when all trusted outcome evidence is present:
+
+| Required evidence | Requirement |
+|---|---|
+| Recovery state | `RECOVERED` |
+| Recovered amount | Greater than `0` |
+| Recovery timestamp | `recovered_at` present |
+| Provider evidence | Razorpay Payment Link ID present |
+| Terminal reason | `trusted_payment_link_paid` |
 
 ## Validated runtime checks
 
-The hardened flow has also been exercised locally with:
-
-- fresh `npm install` — 103 packages audited, 0 reported vulnerabilities
-- ordered migrations — `001_base_schema.sql` and `002_track3_hardening.sql` applied successfully
-- TypeScript typecheck passing
-- deterministic policy tests passing
-- deterministic verifier tests passing
-- signed webhook simulation returning `200 OK`
-- durable retry scheduling with attempt #2 and attempt #3
-- retry exhaustion transitioning the recovery case to `ESCALATED`
-- durable `human_escalations` work-item creation
-- server and background worker startup with non-overlapping polling
-
-These checks validate execution and state transitions, but the business recovery metric remains intentionally stricter: only a trusted paid outcome counts as money recovered.
+| Runtime check | Result |
+|---|---|
+| Fresh dependency install | 103 packages audited, 0 reported vulnerabilities |
+| Ordered migrations | `001_base_schema.sql` and `002_track3_hardening.sql` applied |
+| TypeScript typecheck | Passing |
+| Deterministic policy tests | Passing |
+| Deterministic verifier tests | Passing |
+| Signed webhook simulation | `200 OK` |
+| Durable retry scheduling | Attempt #2 and #3 exercised |
+| Retry exhaustion | Durable escalation exercised |
+| Human escalation work-item creation | Exercised |
+| Server/background workers | Started with non-overlapping polling |
+| Provider-confirmed Test Mode paid outcome | **₹703.51 recovered** |
 
 ## Local setup
 
@@ -279,13 +349,13 @@ RAZORPAY_WEBHOOK_SECRET=
 GROQ_API_KEY=
 ```
 
-Start the server/worker in one terminal:
+Start the server/worker:
 
 ```bash
 npm start
 ```
 
-Prepare and evaluate the batch from another terminal:
+Prepare and evaluate the batch:
 
 ```bash
 npm run evaluate:prepare
@@ -328,6 +398,6 @@ DECISION.md       architecture decisions and trade-offs
 
 ## Engineering record
 
-The project deliberately keeps the debugging trail rather than presenting a fake "everything worked first try" story. `DEBUG.md` records genuine failures and their fixes, including the duplicate Payment Link bug, causal-evidence leakage, webhook-processing idempotency, retry-attempt identity, transaction/pool mistakes, environment/config mismatches, and worker/schema concurrency found during hardening.
+The project deliberately keeps the debugging trail rather than presenting a fake "everything worked first try" story. `DEBUG.md` records genuine failures and their fixes, including duplicate Payment Link creation, causal-evidence leakage, webhook-processing idempotency, retry-attempt identity, transaction/pool mistakes, environment/config mismatches, and worker/schema concurrency discovered during hardening.
 
 `DECISION.md` records the architectural decisions and trade-offs behind the current design.

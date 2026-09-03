@@ -7,6 +7,7 @@
     "typecheck": "tsc --noEmit",
     "start": "tsx src/ingestion/server.ts",
     "db:migrate": "tsx src/db/migrate.ts",
+    "evaluate:prepare": "tsx src/execution/executeOnBatch.ts",
     "evaluate": "tsx src/evaluation/runEvaluation.ts",
     "test:policy": "tsx src/policy/testPolicyGate.ts",
     "test:verifier": "tsx src/verifier/testVerifier.ts",

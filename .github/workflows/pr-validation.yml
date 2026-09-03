@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - track3-hardening-p1
+      - track3-genuine-recovery-evaluation
   pull_request:
     branches:
       - main
+      - track3-hardening-p1
 
 jobs:
   validate:

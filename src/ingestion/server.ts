@@ -16,6 +16,7 @@ const app = express();
 const pool = new Pool();
 const STALE_WEBHOOK_MINUTES = 5;
 const WORKER_POLL_MS = Number(process.env.RECOVERY_WORKER_POLL_MS ?? 5000);
+let workersRunning = false;
 
 function validRazorpaySignature(rawBody: Buffer, signature: string | undefined): boolean {
   const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
@@ -58,7 +59,7 @@ async function processWebhookDelivery(eventId: string): Promise<"processed" | "b
       if (!caseId) throw new Error("payment.failed payload did not contain a payment entity");
       await logAuditEvent(eventId, "trusted_webhook_ingested", { eventType, caseId });
       setImmediate(() => {
-        processPendingRecoveryJobs().catch((error) => console.error("Recovery worker failed:", error));
+        runWorkersSafely("webhook").catch((error) => console.error("Recovery worker failed:", error));
       });
     } else if (eventType === "payment_link.paid") {
       const paymentLink = body?.payload?.payment_link?.entity;
@@ -133,7 +134,22 @@ async function persistWebhook(eventId: string, eventType: string, body: any): Pr
 }
 
 async function runWorkers(): Promise<void> {
+  await ensureTrack3Schema(pool);
   await Promise.all([processPendingRecoveryJobs(), processDueScheduledActions()]);
+}
+
+async function runWorkersSafely(source: "startup" | "poll" | "webhook"): Promise<void> {
+  if (workersRunning) {
+    console.log(`Recovery worker ${source} skipped: previous cycle still running`);
+    return;
+  }
+
+  workersRunning = true;
+  try {
+    await runWorkers();
+  } finally {
+    workersRunning = false;
+  }
 }
 
 app.post(
@@ -191,8 +207,8 @@ app.use(express.json());
 
 app.listen(3000, () => {
   console.log("Server listening on http://localhost:3000");
-  runWorkers().catch((error) => console.error("Recovery worker startup failed:", error));
+  runWorkersSafely("startup").catch((error) => console.error("Recovery worker startup failed:", error));
   setInterval(() => {
-    runWorkers().catch((error) => console.error("Recovery worker poll failed:", error));
+    runWorkersSafely("poll").catch((error) => console.error("Recovery worker poll failed:", error));
   }, WORKER_POLL_MS).unref();
 });

@@ -1,6 +1,8 @@
 import { Router } from "express";
 import type { Pool } from "pg";
 import { POLICY_LIMITS } from "../policy/policyGate";
+import { DEFAULT_CONTACT_WINDOW, refreshRecoveryPriority } from "../intelligence/recoveryIntelligence";
+import { createPromiseToPay, listPromisesForCase } from "../intelligence/paymentPromises";
 import {
   getDashboardSummary,
   getRecoveryCase,
@@ -57,6 +59,62 @@ export function createDashboardRouter(pool: Pool) {
     }
   });
 
+  router.post("/cases/:caseId/priority/refresh", async (req, res) => {
+    try {
+      const caseId = Number(req.params.caseId);
+      if (!Number.isInteger(caseId) || caseId <= 0) {
+        res.status(400).json({ error: "Invalid recovery case id" });
+        return;
+      }
+      res.json(await refreshRecoveryPriority(pool, caseId));
+    } catch (error: any) {
+      res.status(400).json({ error: error.message });
+    }
+  });
+
+  router.get("/cases/:caseId/promises", async (req, res) => {
+    try {
+      const caseId = Number(req.params.caseId);
+      if (!Number.isInteger(caseId) || caseId <= 0) {
+        res.status(400).json({ error: "Invalid recovery case id" });
+        return;
+      }
+      res.json({ items: await listPromisesForCase(pool, caseId) });
+    } catch (error: any) {
+      res.status(500).json({ error: "Unable to load payment promises" });
+    }
+  });
+
+  router.post("/cases/:caseId/promises", async (req, res) => {
+    try {
+      const caseId = Number(req.params.caseId);
+      const promisedAmount = req.body?.promisedAmount == null ? null : Number(req.body.promisedAmount);
+      const dueAt = new Date(String(req.body?.dueAt ?? ""));
+      if (!Number.isInteger(caseId) || caseId <= 0) {
+        res.status(400).json({ error: "Invalid recovery case id" });
+        return;
+      }
+      if (promisedAmount != null && (!Number.isFinite(promisedAmount) || promisedAmount <= 0)) {
+        res.status(400).json({ error: "promisedAmount must be a positive paise value" });
+        return;
+      }
+      if (Number.isNaN(dueAt.getTime())) {
+        res.status(400).json({ error: "dueAt must be a valid date/time" });
+        return;
+      }
+      const result = await createPromiseToPay(pool, {
+        caseId,
+        promisedAmount,
+        dueAt,
+        source: typeof req.body?.source === "string" ? req.body.source : "merchant_dashboard",
+        note: typeof req.body?.note === "string" ? req.body.note : null,
+      });
+      res.status(201).json(result);
+    } catch (error: any) {
+      res.status(400).json({ error: error.message });
+    }
+  });
+
   router.get("/cases/:caseId/timeline", async (req, res) => {
     try {
       const caseId = Number(req.params.caseId);
@@ -94,8 +152,14 @@ export function createDashboardRouter(pool: Pool) {
       recoveredCaseBehavior: "stop",
       optedOutBehavior: "stop",
       ambiguousExecutionBehavior: "fail_closed_and_escalate",
-      quietHours: null,
-      note: "Quiet-hour scheduling is planned for Phase B. Current limits are enforced by the deterministic policy gate.",
+      quietHours: {
+        timeZone: DEFAULT_CONTACT_WINDOW.timeZone,
+        startHour: DEFAULT_CONTACT_WINDOW.quietStartHour,
+        endHour: DEFAULT_CONTACT_WINDOW.quietEndHour,
+        behavior: "defer_until_allowed_window",
+      },
+      prioritization: "expected_recovery_value = amount_at_risk × smoothed historical recovery probability",
+      promiseToPay: "durable promise + reminder scheduling + provider-outcome fulfillment",
     });
   });
 

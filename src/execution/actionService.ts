@@ -5,15 +5,17 @@ import { applyPolicyGate } from "../policy/policyGate";
 import { loadPolicyContext } from "../policy/policyContext";
 import { createHumanEscalation, ensureRecoveryCase, ensureTrack3Schema, isRecoveryTerminal, setRecoveryState } from "../recovery/recoveryStore";
 import { logAuditEvent } from "../ledger/auditLog";
+import { isQuietHours, nextAllowedContactTime } from "../intelligence/recoveryIntelligence";
 
 const pool = new Pool();
 
 export interface ActionServiceResult {
-  status: "executed" | "duplicate" | "blocked" | "failed" | "escalated";
+  status: "executed" | "duplicate" | "blocked" | "failed" | "escalated" | "deferred";
   reason?: string;
   shortUrl?: string | null;
   razorpayStatus?: number;
   retryAfterSeconds?: number | null;
+  deferredUntil?: string | null;
 }
 
 async function trustedEventContext(eventId: string) {
@@ -60,8 +62,6 @@ export async function requestPaymentLink(
     return { status: "blocked", reason: policy.reason };
   }
 
-  // Idempotency belongs to a concrete execution attempt, not merely to the action name.
-  // This allows retry attempt #2 while still preventing duplicate execution of attempt #2.
   const idempotencyKey = executionKey ?? `${eventId}_${desiredAction}_attempt_1`;
   const claim = await pool.query(
     `INSERT INTO actions (intervention_id, razorpay_api_call, idempotency_key, status, response)
@@ -145,7 +145,8 @@ export async function requestPaymentLink(
 export async function recordOutboundContact(
   eventId: string,
   desiredAction: Extract<Action, "whatsapp_nudge" | "offer_alternate_payment_method">,
-  openingMessage: string
+  openingMessage: string,
+  options: { executionKey?: string; purpose?: string; now?: Date; deferDuringQuietHours?: boolean } = {}
 ): Promise<ActionServiceResult> {
   await ensureTrack3Schema(pool);
   const trusted = await trustedEventContext(eventId);
@@ -162,7 +163,31 @@ export async function recordOutboundContact(
     return { status: "blocked", reason: policy.reason };
   }
 
-  const idempotencyKey = `${eventId}_${desiredAction}_contact_1`;
+  const now = options.now ?? new Date();
+  if (options.deferDuringQuietHours !== false && isQuietHours(now)) {
+    const runAt = nextAllowedContactTime(now);
+    const scheduleKey = options.executionKey ?? `${eventId}_${desiredAction}_quiet_hours_${runAt.getTime()}`;
+    await pool.query(
+      `INSERT INTO scheduled_actions
+         (case_id, event_id, intervention_id, desired_action, schedule_key, run_at, status)
+       VALUES ($1, $2, NULL, $3, $4, $5, 'PENDING')
+       ON CONFLICT (schedule_key) DO NOTHING`,
+      [caseId, eventId, `contact:${desiredAction}`, scheduleKey, runAt]
+    );
+    await setRecoveryState(pool, caseId, "SCHEDULED", { strategy: desiredAction });
+    await logAuditEvent(eventId, "contact_deferred_quiet_hours", {
+      desiredAction,
+      purpose: options.purpose ?? desiredAction,
+      deferredUntil: runAt.toISOString(),
+    });
+    return {
+      status: "deferred",
+      reason: "Outbound recovery contact deferred by quiet-hours policy.",
+      deferredUntil: runAt.toISOString(),
+    };
+  }
+
+  const idempotencyKey = options.executionKey ?? `${eventId}_${desiredAction}_contact_1`;
   const claim = await pool.query(
     `INSERT INTO actions (intervention_id, razorpay_api_call, idempotency_key, status, response)
      VALUES (NULL, 'outbound_contact', $1, 'pending', '{}'::jsonb)
@@ -174,12 +199,17 @@ export async function recordOutboundContact(
   await pool.query(
     `INSERT INTO outbound_contacts (case_id, customer_email, channel, purpose, delivery_state)
      VALUES ($1, $2, 'simulated', $3, 'accepted')`,
-    [caseId, trusted.customerEmail, desiredAction]
+    [caseId, trusted.customerEmail, options.purpose ?? desiredAction]
   );
   await pool.query("UPDATE actions SET status = 'success', response = $2 WHERE id = $1", [
     claim.rows[0].id,
-    JSON.stringify({ openingMessage, channel: "simulated" }),
+    JSON.stringify({ openingMessage, channel: "simulated", purpose: options.purpose ?? desiredAction }),
   ]);
   await setRecoveryState(pool, caseId, "WAITING_FOR_OUTCOME", { strategy: desiredAction });
+  await logAuditEvent(eventId, "outbound_contact_recorded", {
+    desiredAction,
+    purpose: options.purpose ?? desiredAction,
+    executionKey: idempotencyKey,
+  });
   return { status: "executed" };
 }

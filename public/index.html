@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Recovery OS — Merchant Console</title>
+  <link rel="stylesheet" href="/dashboard.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">R</div>
+        <div>
+          <strong>Recovery OS</strong>
+          <span>Merchant Console</span>
+        </div>
+      </div>
+
+      <nav class="nav" aria-label="Primary navigation">
+        <button class="nav-item active" data-view="overview">Overview</button>
+        <button class="nav-item" data-view="cases">Recovery Cases</button>
+        <button class="nav-item" data-view="escalations">Human Queue</button>
+        <button class="nav-item" data-view="policy">Policy Center</button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="trust-chip">Provider-confirmed outcomes</div>
+        <small>AI reasons. Policy decides. Razorpay confirms.</small>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Track 3 · AI Revenue Recovery</p>
+          <h1 id="page-title">Revenue Recovery Command Center</h1>
+        </div>
+        <div class="topbar-actions">
+          <div class="live-indicator"><span></span> Live system</div>
+          <button id="refresh-button" class="button secondary">Refresh</button>
+        </div>
+      </header>
+
+      <section id="overview-view" class="view active">
+        <div class="hero-card">
+          <div>
+            <p class="eyebrow">Closed-loop recovery</p>
+            <h2>Recover revenue you can actually prove.</h2>
+            <p>Diagnosis, policy, execution and provider-confirmed outcomes in one merchant view.</p>
+          </div>
+          <div class="hero-proof">
+            <span class="proof-label">Trusted recovery rule</span>
+            <strong>payment_link.paid → RECOVERED</strong>
+          </div>
+        </div>
+
+        <div id="metric-grid" class="metric-grid"></div>
+
+        <div class="grid two-col">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Portfolio</p>
+                <h3>Recovery states</h3>
+              </div>
+            </div>
+            <div id="status-chart" class="bar-list"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Intelligence</p>
+                <h3>Failure causes</h3>
+              </div>
+            </div>
+            <div id="cause-chart" class="bar-list"></div>
+          </section>
+        </div>
+
+        <section class="panel">
+          <div class="panel-header split">
+            <div>
+              <p class="eyebrow">Strategy performance</p>
+              <h3>Recovered value by intervention</h3>
+            </div>
+          </div>
+          <div id="strategy-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header split">
+            <div>
+              <p class="eyebrow">Latest activity</p>
+              <h3>Recent recovery cases</h3>
+            </div>
+            <button class="text-button" data-open-view="cases">View all cases</button>
+          </div>
+          <div id="recent-cases" class="table-wrap"></div>
+        </section>
+      </section>
+
+      <section id="cases-view" class="view">
+        <section class="panel">
+          <div class="panel-header split responsive-stack">
+            <div>
+              <p class="eyebrow">Operations</p>
+              <h3>Recovery Cases</h3>
+            </div>
+            <div class="filters">
+              <input id="case-search" class="input" type="search" placeholder="Search customer, event or payment" />
+              <select id="case-status" class="input">
+                <option value="">All statuses</option>
+                <option>DETECTED</option>
+                <option>EVIDENCE_READY</option>
+                <option>DIAGNOSED</option>
+                <option>VERIFIED</option>
+                <option>ACTION_CHOSEN</option>
+                <option>POLICY_APPROVED</option>
+                <option>POLICY_BLOCKED</option>
+                <option>SCHEDULED</option>
+                <option>WAITING_FOR_OUTCOME</option>
+                <option>RECOVERED</option>
+                <option>STOPPED</option>
+                <option>ESCALATED</option>
+              </select>
+              <button id="apply-case-filter" class="button">Apply</button>
+            </div>
+          </div>
+          <div id="cases-table" class="table-wrap"></div>
+        </section>
+      </section>
+
+      <section id="escalations-view" class="view">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Human-in-the-loop</p>
+              <h3>Recovery Review Queue</h3>
+              <p class="muted">Cases deliberately escalated by policy, agent choice or ambiguous execution state.</p>
+            </div>
+          </div>
+          <div id="escalation-list" class="queue-grid"></div>
+        </section>
+      </section>
+
+      <section id="policy-view" class="view">
+        <div class="grid two-col">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Control plane</p>
+                <h3>Deterministic Policy</h3>
+                <p class="muted">The model can recommend an action. These limits decide whether it may execute.</p>
+              </div>
+            </div>
+            <div id="policy-cards" class="policy-grid"></div>
+          </section>
+
+          <section class="panel accent-panel">
+            <p class="eyebrow">Trust boundary</p>
+            <h3>AI never gets final authority over money.</h3>
+            <div class="trust-flow">
+              <span>LLM diagnosis</span>
+              <b>→</b>
+              <span>Verifier</span>
+              <b>→</b>
+              <span>Policy gate</span>
+              <b>→</b>
+              <span>ActionService</span>
+              <b>→</b>
+              <span>Razorpay outcome</span>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="case-drawer" class="drawer" aria-hidden="true">
+    <div class="drawer-backdrop" data-close-drawer></div>
+    <aside class="drawer-panel">
+      <div class="drawer-header">
+        <div>
+          <p class="eyebrow">Recovery Case</p>
+          <h2 id="drawer-title">Case detail</h2>
+        </div>
+        <button class="icon-button" data-close-drawer aria-label="Close">×</button>
+      </div>
+      <div id="drawer-content" class="drawer-content"></div>
+    </aside>
+  </div>
+
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/dashboard.js" defer></script>
+</body>
+</html>

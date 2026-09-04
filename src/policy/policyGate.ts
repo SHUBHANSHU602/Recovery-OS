@@ -19,8 +19,10 @@ export interface PolicyOutcome {
   finalAction: ExecutableAction;
 }
 
-const MAX_AUTOMATED_RETRIES = 3;
-const MAX_CONTACTS_PER_DAY = 1;
+export const POLICY_LIMITS = {
+  maxAutomatedRetries: 3,
+  maxContactsPerDay: 1,
+} as const;
 
 export function applyPolicyGate(context: PolicyContext): PolicyOutcome {
   const automatedRetryCount = context.automatedRetryCount ?? context.customerFailureCount ?? 0;
@@ -44,18 +46,18 @@ export function applyPolicyGate(context: PolicyContext): PolicyOutcome {
 
   if (
     (context.chosenAction === "retry_now" || context.chosenAction === "retry_with_backoff") &&
-    automatedRetryCount >= MAX_AUTOMATED_RETRIES
+    automatedRetryCount >= POLICY_LIMITS.maxAutomatedRetries
   ) {
     return {
       result: "BLOCKED_ESCALATED",
-      reason: `Recovery case already has ${automatedRetryCount} automated retry attempts; maximum is ${MAX_AUTOMATED_RETRIES}. Escalating instead of executing again.`,
+      reason: `Recovery case already has ${automatedRetryCount} automated retry attempts; maximum is ${POLICY_LIMITS.maxAutomatedRetries}. Escalating instead of executing again.`,
       finalAction: "escalate_to_human",
     };
   }
 
   if (
     (context.chosenAction === "whatsapp_nudge" || context.chosenAction === "offer_alternate_payment_method") &&
-    contactsLast24h >= MAX_CONTACTS_PER_DAY
+    contactsLast24h >= POLICY_LIMITS.maxContactsPerDay
   ) {
     return {
       result: "BLOCKED_ESCALATED",

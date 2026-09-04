@@ -12,6 +12,7 @@ import { processPendingRecoveryJobs } from "../recovery/processRecoveryCase";
 import { processDueScheduledActions } from "../execution/scheduledActions";
 import { logAuditEvent } from "../ledger/auditLog";
 import { createDashboardRouter } from "../dashboard/dashboardRoutes";
+import { refreshMissingOpenRecoveryPriorities } from "../intelligence/recoveryIntelligence";
 
 const app = express();
 const pool = new Pool();
@@ -136,6 +137,10 @@ async function persistWebhook(eventId: string, eventType: string, body: any): Pr
 
 async function runWorkers(): Promise<void> {
   await ensureTrack3Schema(pool);
+  // Phase B may be deployed onto a database containing older open cases that
+  // predate the priority columns. Score those once so the merchant dashboard
+  // does not show a misleading ₹0 expected value until each case is reprocessed.
+  await refreshMissingOpenRecoveryPriorities(pool);
   await Promise.all([processPendingRecoveryJobs(), processDueScheduledActions()]);
 }
 

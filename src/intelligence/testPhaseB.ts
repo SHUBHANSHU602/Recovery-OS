@@ -29,79 +29,78 @@ async function main() {
   assert.ok(probability > 0 && probability < 1);
   assert.equal(expectedRecoveryValue(10000, 0.5), 5000);
 
-  const pool = new Pool();
+  // max:1 guarantees all pool.query calls in this integration test use one
+  // PostgreSQL connection, so its fixture can be rolled back atomically.
+  const pool = new Pool({ max: 1 });
   try {
     await ensureTrack3Schema(pool);
-    const eventId = `phase_b_test_${randomUUID()}`;
-    const paymentId = `pay_phase_b_${randomUUID()}`;
-    await pool.query(
-      `INSERT INTO events (event_id, event_type, payload)
-       VALUES ($1, 'payment.failed', $2)`,
-      [eventId, {
-        event: "payment.failed",
-        payload: { payment: { entity: {
-          id: paymentId,
-          amount: 10000,
-          currency: "INR",
-          email: "phase-b-test@example.com",
-          bank: "AXIS",
-          error_code: "GATEWAY_ERROR",
-          error_description: "Payment authorization timed out",
-          created_at: Math.floor(Date.now() / 1000) - 60,
-        } } },
-      }]
-    );
+    await pool.query("BEGIN");
+    try {
+      const eventId = `phase_b_test_${randomUUID()}`;
+      const paymentId = `pay_phase_b_${randomUUID()}`;
+      await pool.query(
+        `INSERT INTO events (event_id, event_type, payload)
+         VALUES ($1, 'payment.failed', $2)`,
+        [eventId, {
+          event: "payment.failed",
+          payload: { payment: { entity: {
+            id: paymentId,
+            amount: 10000,
+            currency: "INR",
+            email: "phase-b-test@example.com",
+            bank: "AXIS",
+            error_code: "GATEWAY_ERROR",
+            error_description: "Payment authorization timed out",
+            created_at: Math.floor(Date.now() / 1000) - 60,
+          } } },
+        }]
+      );
 
-    const caseId = await ensureRecoveryCase(pool, eventId);
-    assert.ok(caseId);
-    await pool.query(
-      `INSERT INTO diagnoses (event_id, root_cause, rationale, confidence, verifier_result)
-       VALUES ($1, 'systemic_bank_outage', 'test', 0.9, 'PASSED')`,
-      [eventId]
-    );
-    await pool.query("UPDATE recovery_cases SET strategy = 'retry_with_backoff' WHERE id = $1", [caseId]);
+      const caseId = await ensureRecoveryCase(pool, eventId);
+      assert.ok(caseId);
+      await pool.query(
+        `INSERT INTO diagnoses (event_id, root_cause, rationale, confidence, verifier_result)
+         VALUES ($1, 'systemic_bank_outage', 'test', 0.9, 'PASSED')`,
+        [eventId]
+      );
+      await pool.query("UPDATE recovery_cases SET strategy = 'retry_with_backoff' WHERE id = $1", [caseId]);
 
-    const priority = await refreshRecoveryPriority(pool, Number(caseId), "retry_with_backoff");
-    assert.ok(priority.recoveryProbability >= 0.05 && priority.recoveryProbability <= 0.95);
-    assert.equal(priority.expectedRecoveryValue, Math.round(10000 * priority.recoveryProbability));
+      const priority = await refreshRecoveryPriority(pool, Number(caseId), "retry_with_backoff");
+      assert.ok(priority.recoveryProbability >= 0.05 && priority.recoveryProbability <= 0.95);
+      assert.equal(priority.expectedRecoveryValue, Math.round(10000 * priority.recoveryProbability));
 
-    const persistedPriority = await pool.query(
-      "SELECT recovery_probability, expected_recovery_value FROM recovery_cases WHERE id = $1",
-      [caseId]
-    );
-    assert.equal(Number(persistedPriority.rows[0].expected_recovery_value), priority.expectedRecoveryValue);
+      const persistedPriority = await pool.query(
+        "SELECT recovery_probability, expected_recovery_value FROM recovery_cases WHERE id = $1",
+        [caseId]
+      );
+      assert.equal(Number(persistedPriority.rows[0].expected_recovery_value), priority.expectedRecoveryValue);
 
-    const dueAt = new Date(Date.now() + 2 * 60 * 60 * 1000);
-    const promise = await createPromiseToPay(pool, {
-      caseId: Number(caseId),
-      promisedAmount: 7500,
-      dueAt,
-      source: "phase_b_test",
-      note: "customer promised later payment",
-    });
-    assert.equal(promise.promisedAmount, 7500);
+      const dueAt = new Date(Date.now() + 2 * 60 * 60 * 1000);
+      const promise = await createPromiseToPay(pool, {
+        caseId: Number(caseId),
+        promisedAmount: 7500,
+        dueAt,
+        source: "phase_b_test",
+        note: "customer promised later payment",
+      });
+      assert.equal(promise.promisedAmount, 7500);
 
-    const promises = await listPromisesForCase(pool, Number(caseId));
-    assert.equal(promises.length, 1);
-    assert.equal(promises[0].status, "PENDING");
+      const promises = await listPromisesForCase(pool, Number(caseId));
+      assert.equal(promises.length, 1);
+      assert.equal(promises[0].status, "PENDING");
 
-    const scheduled = await pool.query(
-      `SELECT desired_action, status FROM scheduled_actions
-       WHERE case_id = $1 AND desired_action = 'promise_to_pay_reminder'`,
-      [caseId]
-    );
-    assert.equal(scheduled.rows.length, 1);
-    assert.equal(scheduled.rows[0].status, "PENDING");
+      const scheduled = await pool.query(
+        `SELECT desired_action, status FROM scheduled_actions
+         WHERE case_id = $1 AND desired_action = 'promise_to_pay_reminder'`,
+        [caseId]
+      );
+      assert.equal(scheduled.rows.length, 1);
+      assert.equal(scheduled.rows[0].status, "PENDING");
 
-    // This test deliberately leaves the case open so the promise remains inspectable,
-    // but it must not leave a recovery job for the later server smoke test to execute
-    // against CI's fake Groq credentials.
-    await pool.query(
-      "UPDATE recovery_jobs SET status = 'DONE', last_error = NULL, updated_at = now() WHERE case_id = $1",
-      [caseId]
-    );
-
-    console.log("Phase B intelligence tests passed.");
+      console.log("Phase B intelligence tests passed.");
+    } finally {
+      await pool.query("ROLLBACK");
+    }
   } finally {
     await pool.end();
   }

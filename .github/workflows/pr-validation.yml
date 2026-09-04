@@ -5,6 +5,7 @@ on:
     branches:
       - track3-hardening-p1
       - track3-genuine-recovery-evaluation
+      - phase-a-merchant-dashboard
   pull_request:
     branches:
       - main
@@ -59,7 +60,7 @@ jobs:
       - name: Deterministic core tests
         run: npm run test:core
 
-      - name: Smoke-test server and background worker
+      - name: Smoke-test server, dashboard and background worker
         shell: bash
         run: |
           set -euo pipefail
@@ -72,6 +73,11 @@ jobs:
             echo "Server exited during smoke test"
             exit 1
           fi
+
+          curl --fail --silent --show-error http://localhost:3000/health | grep '"status":"ok"'
+          curl --fail --silent --show-error http://localhost:3000/api/dashboard/summary | grep '"totalCases"'
+          curl --fail --silent --show-error http://localhost:3000/api/dashboard/cases | grep '"cases"'
+          curl --fail --silent --show-error http://localhost:3000/ | grep 'Revenue Recovery Command Center'
 
           if grep -E "Recovery worker (startup|poll) failed|Unhandled|uncaught" server.log; then
             cat server.log

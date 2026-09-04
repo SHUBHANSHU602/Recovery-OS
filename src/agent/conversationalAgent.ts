@@ -1,7 +1,7 @@
 import "dotenv/config";
 import Groq from "groq-sdk";
 import { Pool } from "pg";
-import { checkCustomerRiskFlags, generatePaymentLink, escalateToHuman } from "./tools";
+import { checkCustomerRiskFlags, generatePaymentLink, recordPromiseToPay, escalateToHuman } from "./tools";
 
 const pool = new Pool();
 
@@ -25,6 +25,23 @@ const TOOLS = [
   {
     type: "function" as const,
     function: {
+      name: "record_promise_to_pay",
+      description: "Persist a future payment commitment only when the customer explicitly promises to pay later.",
+      parameters: {
+        type: "object",
+        properties: {
+          dueAt: { type: "string", description: "Future ISO-8601 date/time for the customer's explicit commitment." },
+          promisedAmount: { type: "number", description: "Promised amount in paise. Omit to use the outstanding amount." },
+          note: { type: "string", description: "Short evidence note quoting or summarizing the explicit customer commitment." },
+        },
+        required: ["dueAt"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
       name: "escalate_to_human",
       description: "Escalate this conversation to a human agent.",
       parameters: {
@@ -37,13 +54,17 @@ const TOOLS = [
 ];
 
 function buildSystemPrompt(customerEmail: string, amount: number): string {
+  const now = new Date().toISOString();
+  const timezone = process.env.RECOVERY_TIMEZONE || "Asia/Kolkata";
   return `You are a payment recovery assistant helping a customer whose payment failed.
 
 Known trusted context:
 - Customer email: ${customerEmail}
 - Amount due: ${amount} paise (₹${(amount / 100).toFixed(2)})
+- Current server time: ${now}
+- Merchant recovery timezone: ${timezone}
 
-Be brief and helpful. Tools request intents only; deterministic backend policy decides whether a side effect is allowed. Never ask the customer to provide an amount or identity that the backend already knows. Escalate instead of guessing.`;
+Be brief and helpful. Tools request intents only; deterministic backend policy decides whether a side effect is allowed. Never ask the customer to provide an amount or identity that the backend already knows. Only use record_promise_to_pay when the customer explicitly commits to paying at a future time; do not infer a promise from uncertainty or a vague intention. Convert a clear relative time such as "tonight at 8" into a future ISO-8601 time using the supplied merchant timezone. Escalate instead of guessing.`;
 }
 
 async function getOrCreateConversation(eventId: string, customerEmail: string, amount: number) {
@@ -98,6 +119,8 @@ export async function runAgentTurn(eventId: string, customerEmail: string, amoun
         result = await checkCustomerRiskFlags(customerEmail);
       } else if (toolCall.function.name === "generate_payment_link") {
         result = await generatePaymentLink(eventId, amount);
+      } else if (toolCall.function.name === "record_promise_to_pay") {
+        result = await recordPromiseToPay(eventId, args.dueAt, args.promisedAmount ?? null, args.note ?? null);
       } else if (toolCall.function.name === "escalate_to_human") {
         result = await escalateToHuman(eventId, args.reason);
       } else {

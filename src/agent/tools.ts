@@ -2,6 +2,7 @@ import "dotenv/config";
 import { Pool } from "pg";
 import { requestPaymentLink } from "../execution/actionService";
 import { createHumanEscalation, ensureRecoveryCase, ensureTrack3Schema } from "../recovery/recoveryStore";
+import { createPromiseToPay } from "../intelligence/paymentPromises";
 import { logAuditEvent } from "../ledger/auditLog";
 
 const pool = new Pool();
@@ -25,6 +26,36 @@ export async function generatePaymentLink(eventId: string, _amount: number): Pro
     status: result.status,
     reason: result.reason,
   };
+}
+
+export async function recordPromiseToPay(
+  eventId: string,
+  dueAtIso: string,
+  promisedAmount?: number | null,
+  note?: string | null
+): Promise<{ recorded: boolean; promiseId?: number; dueAt?: string; promisedAmount?: number; reason?: string }> {
+  await ensureTrack3Schema(pool);
+  const caseId = await ensureRecoveryCase(pool, eventId);
+  if (!caseId) return { recorded: false, reason: "Recovery case not found" };
+
+  try {
+    const dueAt = new Date(dueAtIso);
+    const promise = await createPromiseToPay(pool, {
+      caseId,
+      promisedAmount: promisedAmount == null ? null : Number(promisedAmount),
+      dueAt,
+      source: "conversational_agent",
+      note: note ?? null,
+    });
+    return {
+      recorded: true,
+      promiseId: promise.id,
+      dueAt: promise.dueAt.toISOString(),
+      promisedAmount: promise.promisedAmount,
+    };
+  } catch (error: any) {
+    return { recorded: false, reason: error.message };
+  }
 }
 
 export async function escalateToHuman(eventId: string, reason: string): Promise<{ escalated: boolean }> {

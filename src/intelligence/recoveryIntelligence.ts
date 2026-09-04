@@ -150,3 +150,25 @@ export async function refreshRecoveryPriority(
 
   return { recoveryProbability, expectedRecoveryValue: expectedValue, rootCause, strategy };
 }
+
+export async function refreshMissingOpenRecoveryPriorities(pool: Pool, limit = 100): Promise<number> {
+  const result = await pool.query(
+    `SELECT id, strategy
+     FROM recovery_cases
+     WHERE status NOT IN ('RECOVERED', 'STOPPED', 'ESCALATED')
+       AND (recovery_probability IS NULL OR expected_recovery_value IS NULL)
+     ORDER BY updated_at ASC
+     LIMIT $1`,
+    [Math.min(500, Math.max(1, limit))]
+  );
+
+  for (const row of result.rows) {
+    await refreshRecoveryPriority(
+      pool,
+      Number(row.id),
+      row.strategy == null ? null : String(row.strategy)
+    );
+  }
+
+  return result.rows.length;
+}

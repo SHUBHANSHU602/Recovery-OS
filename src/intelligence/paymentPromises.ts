@@ -30,8 +30,10 @@ export async function createPromiseToPay(pool: Pool, input: PromiseToPayInput) {
   }
 
   const outstanding = Math.max(0, Number(row.amount_at_risk ?? 0) - Number(row.recovered_amount ?? 0));
-  const promisedAmount = Math.max(1, Math.min(outstanding || Number(row.amount_at_risk ?? 0), Math.floor(input.promisedAmount ?? outstanding)));
-  if (promisedAmount <= 0) throw new Error("Promise amount must be positive");
+  if (outstanding <= 0) throw new Error("Recovery case has no outstanding amount to promise");
+  const requestedAmount = Math.floor(input.promisedAmount ?? outstanding);
+  if (requestedAmount <= 0) throw new Error("Promise amount must be positive");
+  const promisedAmount = Math.min(outstanding, requestedAmount);
 
   const reminderAt = nextAllowedContactTime(input.dueAt);
   const client = await pool.connect();

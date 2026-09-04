@@ -93,6 +93,14 @@ async function main() {
     assert.equal(scheduled.rows.length, 1);
     assert.equal(scheduled.rows[0].status, "PENDING");
 
+    // This test deliberately leaves the case open so the promise remains inspectable,
+    // but it must not leave a recovery job for the later server smoke test to execute
+    // against CI's fake Groq credentials.
+    await pool.query(
+      "UPDATE recovery_jobs SET status = 'DONE', last_error = NULL, updated_at = now() WHERE case_id = $1",
+      [caseId]
+    );
+
     console.log("Phase B intelligence tests passed.");
   } finally {
     await pool.end();

@@ -1,5 +1,6 @@
 import { Router } from "express";
 import type { Pool } from "pg";
+import { POLICY_LIMITS } from "../policy/policyGate";
 import {
   getDashboardSummary,
   getRecoveryCase,
@@ -88,8 +89,8 @@ export function createDashboardRouter(pool: Pool) {
   router.get("/policy", (_req, res) => {
     res.json({
       mode: "deterministic",
-      maxAutomatedRetries: 3,
-      maxContactsPerDay: 1,
+      maxAutomatedRetries: POLICY_LIMITS.maxAutomatedRetries,
+      maxContactsPerDay: POLICY_LIMITS.maxContactsPerDay,
       recoveredCaseBehavior: "stop",
       optedOutBehavior: "stop",
       ambiguousExecutionBehavior: "fail_closed_and_escalate",

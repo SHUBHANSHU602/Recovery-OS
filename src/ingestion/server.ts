@@ -11,6 +11,7 @@ import {
 import { processPendingRecoveryJobs } from "../recovery/processRecoveryCase";
 import { processDueScheduledActions } from "../execution/scheduledActions";
 import { logAuditEvent } from "../ledger/auditLog";
+import { createDashboardRouter } from "../dashboard/dashboardRoutes";
 
 const app = express();
 const pool = new Pool();
@@ -204,9 +205,21 @@ app.post(
 );
 
 app.use(express.json());
+app.use("/api/dashboard", createDashboardRouter(pool));
+app.use(express.static("public"));
+
+app.get("/health", async (_req, res) => {
+  try {
+    await pool.query("SELECT 1");
+    res.json({ status: "ok", database: "connected" });
+  } catch (error: any) {
+    res.status(503).json({ status: "degraded", database: "unavailable", error: error.message });
+  }
+});
 
 app.listen(3000, () => {
   console.log("Server listening on http://localhost:3000");
+  console.log("Merchant dashboard available at http://localhost:3000");
   runWorkersSafely("startup").catch((error) => console.error("Recovery worker startup failed:", error));
   setInterval(() => {
     runWorkersSafely("poll").catch((error) => console.error("Recovery worker poll failed:", error));

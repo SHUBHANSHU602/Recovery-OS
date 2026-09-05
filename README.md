@@ -23,6 +23,9 @@ These are results that were actually exercised during local release validation:
 | Validation | Result |
 |---|---:|
 | Razorpay Test Mode recovery confirmed by trusted `payment_link.paid` | **₹703.51 recovered** |
+| Live Razorpay provider reconciliation | **10/10 links matched, 0 mismatches** |
+| Paid-link accounting | **1/1 paid link correctly reconciled** |
+| Unpaid-link accounting | **9/9 unpaid links excluded from recovered revenue** |
 | Diagnosis accuracy on `batch_1` | **24/25 (96.0%)** |
 | Durable recovery-case coverage | **25/25 (100%)** |
 | Static rules + same policy gate | **9/12 (75.0%)** |
@@ -30,7 +33,11 @@ These are results that were actually exercised during local release validation:
 | Final signed closed-loop integration test | **PASS** |
 | Database append-only audit guard | **UPDATE/DELETE blocked** |
 
-The ₹703.51 result came from a Razorpay **Test Mode Payment Link** that reached the trusted paid-outcome path and moved its recovery case to `RECOVERED`. The 12-scenario AI comparison measures contextual decision quality, not revenue lift.
+The ₹703.51 result came from a Razorpay **Test Mode Payment Link** that reached the trusted paid-outcome path and moved its recovery case to `RECOVERED`. The provider reconciliation test then checked all 10 provider-created Test Mode links against Razorpay's current state: the paid link matched trusted recovered accounting, all 9 unpaid links remained excluded from recovered revenue, and the run completed with **0 mismatches**. The 12-scenario AI comparison measures contextual decision quality, not revenue lift.
+
+> 📸 **SCREENSHOT PLACEHOLDER — replace this line with the terminal screenshot showing `PROVIDER RECONCILIATION RESULT: PASS`.**
+
+For deeper engineering context: [`DEBUG.md`](./DEBUG.md) records the important bugs, root causes, fixes, and validation results; [`DECISION.md`](./DECISION.md) explains the architecture, technology choices, and trade-offs.
 
 ---
 
@@ -167,7 +174,7 @@ A confirmed recovery therefore contains the recovery state, positive recovered a
 
 ## Release validation
 
-The release pass exercised the full core suite plus signed webhook validation, action idempotency, retry/backoff/rate-limit handling, retry exhaustion, quiet hours, human escalation, conversational tool calling, Promise-to-Pay replacement and overdue replanning, trusted `payment_link.paid → RECOVERED`, original `payment.captured → STOPPED`, the database append-only audit trigger, and the final closed-loop integration path ending with the dashboard showing `RECOVERED`.
+The release pass exercised the full core suite plus signed webhook validation, action idempotency, retry/backoff/rate-limit handling, retry exhaustion, quiet hours, human escalation, conversational tool calling, Promise-to-Pay replacement and overdue replanning, trusted `payment_link.paid → RECOVERED`, original `payment.captured → STOPPED`, the database append-only audit trigger, the final closed-loop integration path ending with the dashboard showing `RECOVERED`, and live provider reconciliation across all existing Razorpay Test Mode Payment Links.
 
 The final integration proof followed:
 
@@ -242,6 +249,7 @@ Useful evaluation commands:
 npm run evaluate
 npm run evaluate:competitive
 npm run evaluate:ai
+npm run evaluate:provider
 ```
 
 ---
@@ -261,13 +269,14 @@ src/
   intelligence/   prioritization, quiet hours, Promise-to-Pay
   channels/       email/SMS/WhatsApp/voice
   dashboard/      merchant console APIs
-  evaluation/     batch, competitive, and AI benchmarks
+  evaluation/     batch, competitive, AI, and provider reconciliation tests
   ledger/         audit logging
   db/             migrations/runtime schema support
 
 sql/              ordered PostgreSQL migrations
 DEBUG.md          real bugs, root causes, fixes, results
 DECISION.md       architecture and engineering decisions
+SUBMISSION_EVIDENCE.md concise submission-facing validation summary
 ```
 
 ---

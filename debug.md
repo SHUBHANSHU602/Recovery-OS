@@ -83,3 +83,32 @@ Acceptance criteria are satisfied:
 Do not claim that this benchmark is provider-confirmed revenue lift. It measures labeled contextual decision quality with the same deterministic policy controls applied after planning.
 
 The validated claim is: on this 12-scenario labeled contextual decision benchmark, static rules + policy scored 9/12 (75.0%) while AI planner + deterministic business guardrails + the same policy controls scored 12/12 (100.0%) on two consecutive local runs.
+
+---
+
+## 2026-09-05 — Final E2E test fixture reused HDFC and triggered correlation guard
+
+### Failure
+A fresh `final-e2e-test.ts` run created case `214` from a synthetic insufficient-funds failure, but the persisted diagnosis ended as `ambiguous` with verifier result `FAILED_INVARIANT`, so the case safely escalated and the test assertion expecting `insufficient_funds` failed.
+
+### Investigation
+`gatherEvidence()` counts every earlier `payment.failed` event at the same bank in the 30-minute window before the event timestamp. The verifier deliberately rejects a customer-specific diagnosis (`insufficient_funds` / `expired_card`) when that correlated same-bank count is at least 2, because the pattern may be systemic.
+
+The final E2E fixture reused `bank: "HDFC"` after many local HDFC failure fixtures had already been created during release testing. Therefore repeated test data can contaminate the intended isolated insufficient-funds scenario.
+
+The system behaved fail-closed: the verifier downgraded the diagnosis to `ambiguous` and the recovery case escalated instead of executing a confident automated recovery path.
+
+### Resolution
+Do not weaken the production verifier for this test. Isolate the synthetic E2E fixture instead by using a unique bank identifier per run (for example `E2E_BANK_<timestamp>`), while keeping the explicit `Insufficient balance in account` error evidence.
+
+This preserves the production invariant and makes the E2E test deterministic with respect to correlation history.
+
+### Separate test-harness correction
+The first E2E attempt also queried a non-existent `audit_log.payload` column after the product had already reached `RECOVERED`. The audit table stores JSON under `detail`, so the local verification script must query `detail`.
+
+### Validation required
+Rerun the final E2E test after both fixture corrections:
+- unique synthetic bank per run,
+- `audit_log.detail` instead of `audit_log.payload`.
+
+Expected result: the isolated insufficient-funds case should pass diagnosis/verifier, execute the bounded recovery action, accept the trusted signed `payment_link.paid` outcome, transition to `RECOVERED`, cancel pending work, and complete dashboard/audit/webhook assertions.

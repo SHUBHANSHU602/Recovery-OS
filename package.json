@@ -13,7 +13,8 @@
     "test:verifier": "tsx src/verifier/testVerifier.ts",
     "test:dashboard": "tsx src/dashboard/testDashboard.ts",
     "test:intelligence": "tsx src/intelligence/testPhaseB.ts",
-    "test:core": "npm run typecheck && npm run test:policy && npm run test:verifier && npm run test:dashboard && npm run test:intelligence"
+    "test:channels": "tsx src/channels/testChannels.ts",
+    "test:core": "npm run typecheck && npm run test:policy && npm run test:verifier && npm run test:dashboard && npm run test:intelligence && npm run test:channels"
   },
   "engines": {
     "node": ">=20"

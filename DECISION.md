@@ -180,17 +180,16 @@
 - **Decision:** Phase B records/defer-schedules outbound contacts but does not pretend WhatsApp/SMS/email/voice are live provider integrations.
 - Real channel delivery belongs to Phase C and will use the same policy and scheduling boundaries.
 
-## Phase C — Omnichannel recovery — 2026-09-05
+## Phase D — Competitive evaluation — 2026-09-05
 
-### Channels share one recovery boundary
-- **Decision:** email, SMS, WhatsApp and voice use one channel service instead of separate feature-specific side-effect paths.
-- Every send reloads trusted recovery-case/customer data, checks terminal state and the deterministic 24-hour contact cap, then records a durable delivery row before provider execution.
-- Rationale: adding more channels must not create four new ways to bypass recovery policy.
+### Offline benchmark and provider-confirmed revenue are separate evidence classes
+- **Decision:** the 500-case treatment/control benchmark is explicitly synthetic and counterfactual. Its simulated outcomes never write to `recovery_cases` and never contribute to provider-confirmed recovered revenue.
+- Rationale: a larger benchmark improves experimental comparability without weakening the strict Razorpay paid-outcome accounting rule.
 
-### Provider availability is explicit, never implied
-- **Decision:** email uses Resend when configured; SMS, WhatsApp and voice use Twilio when configured. Missing credentials produce an explicitly `SIMULATED` delivery rather than pretending a provider send occurred.
-- Rationale: demo breadth is useful only if provider claims remain honest and machine-visible.
+### Reproducibility beats random headline generation
+- **Decision:** benchmark scenarios use a fixed seeded PRNG, deterministic cause distribution, deterministic amount generation, and randomized treatment/control assignment from the same seed.
+- Rationale: the exact 500-case dataset and result can be reproduced from source; changing the seed or assumptions is an explicit methodology change.
 
-### Channel delivery is not revenue recovery
-- **Decision:** `channel_deliveries` records communication attempts only. No accepted message, SMS, WhatsApp send, email, or voice call changes `recovery_cases.recovered_amount` or `RECOVERED` state.
-- Rationale: the existing trusted Razorpay paid-outcome contract remains the only source of recovered revenue.
+### Recovery probabilities are assumptions, not empirical claims
+- **Decision:** cause-specific control/treatment probabilities are declared in source and documentation as benchmark assumptions.
+- Rationale: simulated lift is useful for testing evaluation mechanics, but it must not be described as observed merchant performance or real recovered money.

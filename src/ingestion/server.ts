@@ -13,6 +13,7 @@ import { processDueScheduledActions } from "../execution/scheduledActions";
 import { logAuditEvent } from "../ledger/auditLog";
 import { createDashboardRouter } from "../dashboard/dashboardRoutes";
 import { refreshMissingOpenRecoveryPriorities } from "../intelligence/recoveryIntelligence";
+import { createChannelRouter } from "../channels/channelRoutes";
 
 const app = express();
 const pool = new Pool();
@@ -32,15 +33,9 @@ function validRazorpaySignature(rawBody: Buffer, signature: string | undefined):
 async function processWebhookDelivery(eventId: string): Promise<"processed" | "busy"> {
   const claim = await pool.query(
     `UPDATE webhook_deliveries
-     SET status = 'PROCESSING',
-         claimed_at = now(),
-         attempt_count = attempt_count + 1,
-         updated_at = now()
+     SET status = 'PROCESSING', claimed_at = now(), attempt_count = attempt_count + 1, updated_at = now()
      WHERE event_id = $1
-       AND (
-         status IN ('RECEIVED', 'FAILED')
-         OR (status = 'PROCESSING' AND claimed_at < now() - ($2 * interval '1 minute'))
-       )
+       AND (status IN ('RECEIVED', 'FAILED') OR (status = 'PROCESSING' AND claimed_at < now() - ($2 * interval '1 minute')))
      RETURNING event_type`,
     [eventId, STALE_WEBHOOK_MINUTES]
   );
@@ -93,17 +88,13 @@ async function processWebhookDelivery(eventId: string): Promise<"processed" | "b
     }
 
     await pool.query(
-      `UPDATE webhook_deliveries
-       SET status = 'PROCESSED', processed_at = now(), last_error = NULL, updated_at = now()
-       WHERE event_id = $1`,
+      `UPDATE webhook_deliveries SET status = 'PROCESSED', processed_at = now(), last_error = NULL, updated_at = now() WHERE event_id = $1`,
       [eventId]
     );
     return "processed";
   } catch (error: any) {
     await pool.query(
-      `UPDATE webhook_deliveries
-       SET status = 'FAILED', last_error = $2, updated_at = now()
-       WHERE event_id = $1`,
+      `UPDATE webhook_deliveries SET status = 'FAILED', last_error = $2, updated_at = now() WHERE event_id = $1`,
       [eventId, error.message]
     );
     throw error;
@@ -115,15 +106,11 @@ async function persistWebhook(eventId: string, eventType: string, body: any): Pr
   try {
     await client.query("BEGIN");
     await client.query(
-      `INSERT INTO events (event_id, event_type, payload)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (event_id) DO NOTHING`,
+      `INSERT INTO events (event_id, event_type, payload) VALUES ($1, $2, $3) ON CONFLICT (event_id) DO NOTHING`,
       [eventId, eventType, body]
     );
     await client.query(
-      `INSERT INTO webhook_deliveries (event_id, event_type, status)
-       VALUES ($1, $2, 'RECEIVED')
-       ON CONFLICT (event_id) DO NOTHING`,
+      `INSERT INTO webhook_deliveries (event_id, event_type, status) VALUES ($1, $2, 'RECEIVED') ON CONFLICT (event_id) DO NOTHING`,
       [eventId, eventType]
     );
     await client.query("COMMIT");
@@ -137,9 +124,6 @@ async function persistWebhook(eventId: string, eventType: string, body: any): Pr
 
 async function runWorkers(): Promise<void> {
   await ensureTrack3Schema(pool);
-  // Phase B may be deployed onto a database containing older open cases that
-  // predate the priority columns. Score those once so the merchant dashboard
-  // does not show a misleading ₹0 expected value until each case is reprocessed.
   await refreshMissingOpenRecoveryPriorities(pool);
   await Promise.all([processPendingRecoveryJobs(), processDueScheduledActions()]);
 }
@@ -149,7 +133,6 @@ async function runWorkersSafely(source: "startup" | "poll" | "webhook"): Promise
     console.log(`Recovery worker ${source} skipped: previous cycle still running`);
     return;
   }
-
   workersRunning = true;
   try {
     await runWorkers();
@@ -211,6 +194,7 @@ app.post(
 
 app.use(express.json());
 app.use("/api/dashboard", createDashboardRouter(pool));
+app.use("/api/channels", createChannelRouter(pool));
 app.use(express.static("public"));
 
 app.get("/health", async (_req, res) => {
@@ -225,6 +209,7 @@ app.get("/health", async (_req, res) => {
 app.listen(3000, () => {
   console.log("Server listening on http://localhost:3000");
   console.log("Merchant dashboard available at http://localhost:3000");
+  console.log("Recovery channels console available at http://localhost:3000/channels.html");
   runWorkersSafely("startup").catch((error) => console.error("Recovery worker startup failed:", error));
   setInterval(() => {
     runWorkersSafely("poll").catch((error) => console.error("Recovery worker poll failed:", error));

@@ -36,6 +36,18 @@ function normalizeCaseRow(row: any) {
     verifierResult: row.verifier_result == null ? null : String(row.verifier_result),
     chosenAction: row.chosen_action == null ? null : String(row.chosen_action),
     finalAction: row.final_action == null ? null : String(row.final_action),
+    recoveryPlan: row.plan_version == null ? null : {
+      version: asNumber(row.plan_version),
+      trigger: String(row.plan_trigger),
+      objective: String(row.plan_objective),
+      primaryAction: String(row.plan_primary_action),
+      fallbackAction: String(row.plan_fallback_action),
+      reasoning: String(row.plan_reasoning),
+      escalationCriteria: Array.isArray(row.plan_escalation_criteria) ? row.plan_escalation_criteria : [],
+      stopConditions: Array.isArray(row.plan_stop_conditions) ? row.plan_stop_conditions : [],
+      policyResult: String(row.plan_policy_result),
+      policyFinalAction: String(row.plan_policy_final_action),
+    },
     nextRunAt: row.next_run_at ?? null,
     escalationStatus: row.escalation_status == null ? null : String(row.escalation_status),
     escalationReason: row.escalation_reason == null ? null : String(row.escalation_reason),
@@ -62,6 +74,16 @@ const CASE_SELECT = `
     d.verifier_result,
     i.chosen_action,
     i.final_action,
+    rp.version AS plan_version,
+    rp.trigger AS plan_trigger,
+    rp.objective AS plan_objective,
+    rp.primary_action AS plan_primary_action,
+    rp.fallback_action AS plan_fallback_action,
+    rp.reasoning AS plan_reasoning,
+    rp.escalation_criteria AS plan_escalation_criteria,
+    rp.stop_conditions AS plan_stop_conditions,
+    rp.policy_result AS plan_policy_result,
+    rp.policy_final_action AS plan_policy_final_action,
     sa.next_run_at,
     he.status AS escalation_status,
     he.reason AS escalation_reason,
@@ -91,6 +113,14 @@ const CASE_SELECT = `
     ORDER BY id DESC
     LIMIT 1
   ) i ON true
+  LEFT JOIN LATERAL (
+    SELECT version, trigger, objective, primary_action, fallback_action, reasoning,
+           escalation_criteria, stop_conditions, policy_result, policy_final_action
+    FROM recovery_plans
+    WHERE case_id = rc.id
+    ORDER BY version DESC
+    LIMIT 1
+  ) rp ON true
   LEFT JOIN LATERAL (
     SELECT MIN(run_at) AS next_run_at
     FROM scheduled_actions

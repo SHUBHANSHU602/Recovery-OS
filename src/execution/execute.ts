@@ -4,6 +4,7 @@ import { logAuditEvent } from "../ledger/auditLog";
 import { startOutboundRecoveryMessage } from "../agent/conversationalAgent";
 import { recordOutboundContact, requestPaymentLink } from "./actionService";
 import { scheduleBackoffRetry } from "./scheduledActions";
+import { scheduleBusinessOutcomeReview } from "../recovery/replanQueue";
 import { createHumanEscalation, ensureRecoveryCase, ensureTrack3Schema, setRecoveryState } from "../recovery/recoveryStore";
 
 const pool = new Pool();
@@ -20,6 +21,21 @@ const OPENING_MESSAGES: Record<string, string> = {
   whatsapp_nudge: "Hi! We noticed your recent payment didn't go through. Would you like a fresh payment link to try again?",
   offer_alternate_payment_method: "Hi! Your payment could not be completed. Would you like to try a different payment method?",
 };
+
+async function scheduleReview(context: ExecutionContext, action: string): Promise<void> {
+  const caseId = await ensureRecoveryCase(pool, context.eventId);
+  if (!caseId) return;
+  await scheduleBusinessOutcomeReview(pool, {
+    caseId,
+    eventId: context.eventId,
+    interventionId: context.interventionId,
+    action,
+  });
+  await logAuditEvent(context.eventId, "business_outcome_review_scheduled", {
+    interventionId: context.interventionId,
+    action,
+  });
+}
 
 export async function executeAction(context: ExecutionContext): Promise<void> {
   await ensureTrack3Schema(pool);
@@ -38,6 +54,7 @@ export async function executeAction(context: ExecutionContext): Promise<void> {
       context.interventionId,
       `${context.eventId}_retry_now_attempt_1`
     );
+    if (result.status === "executed") await scheduleReview(context, context.finalAction);
     await logAuditEvent(context.eventId, "execution_result", {
       interventionId: context.interventionId,
       finalAction: context.finalAction,
@@ -60,6 +77,7 @@ export async function executeAction(context: ExecutionContext): Promise<void> {
     const result = await recordOutboundContact(context.eventId, context.finalAction, opening);
     if (result.status === "executed") {
       await startOutboundRecoveryMessage(context.eventId, context.customerEmail, context.amount, opening);
+      await scheduleReview(context, context.finalAction);
     }
     await logAuditEvent(context.eventId, "execution_conversation_started", {
       interventionId: context.interventionId,

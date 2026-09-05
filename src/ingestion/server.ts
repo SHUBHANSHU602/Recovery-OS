@@ -10,6 +10,7 @@ import {
 } from "../recovery/recoveryPaymentLinks";
 import { processPendingRecoveryJobs } from "../recovery/processRecoveryCase";
 import { processDueScheduledActions } from "../execution/scheduledActions";
+import { cancelOutstandingRecoveryPaymentLinks } from "../execution/paymentLinkProvider";
 import { logAuditEvent } from "../ledger/auditLog";
 import { createDashboardRouter } from "../dashboard/dashboardRoutes";
 import { refreshMissingOpenRecoveryPriorities } from "../intelligence/recoveryIntelligence";
@@ -68,6 +69,10 @@ async function processWebhookDelivery(eventId: string): Promise<"processed" | "b
         paidAmount,
         paymentLink.reference_id == null ? null : String(paymentLink.reference_id)
       );
+      let cancelledOtherLinks: Array<{ paymentLinkId: string; outcome: string }> = [];
+      if (recovery.transitioned && recovery.caseId != null) {
+        cancelledOtherLinks = await cancelOutstandingRecoveryPaymentLinks(pool, recovery.caseId, String(paymentLink.id));
+      }
       await logAuditEvent(eventId, "recovery_outcome_webhook", {
         eventType,
         paymentLinkId: paymentLink.id,
@@ -76,16 +81,19 @@ async function processWebhookDelivery(eventId: string): Promise<"processed" | "b
         transitioned: recovery.transitioned,
         recoveryCaseId: recovery.caseId,
         originalEventId: recovery.originalEventId,
+        cancelledOtherLinks,
       });
     } else if (eventType === "payment.captured") {
       const payment = body?.payload?.payment?.entity;
       if (!payment?.id) throw new Error("Malformed payment.captured payload");
       const stoppedCases = await markOriginalPaymentCapturedFinancial(pool, String(payment.id));
       for (const stopped of stoppedCases) {
+        const cancelledRecoveryLinks = await cancelOutstandingRecoveryPaymentLinks(pool, stopped.caseId);
         await logAuditEvent(stopped.originalEventId, "original_payment_captured_stop", {
           capturedWebhookEventId: eventId,
           paymentId: payment.id,
           caseId: stopped.caseId,
+          cancelledRecoveryLinks,
         });
       }
     }

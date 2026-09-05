@@ -1,6 +1,7 @@
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { randomUUID } from "node:crypto";
 import { POLICY_LIMITS } from "../policy/policyGate";
+import { isQuietHours, nextAllowedContactTime } from "../intelligence/recoveryIntelligence";
 
 export type RecoveryChannel = "email" | "sms" | "whatsapp" | "voice";
 
@@ -8,6 +9,7 @@ export interface ChannelSendInput {
   caseId: number;
   channel: RecoveryChannel;
   message?: string | null;
+  now?: Date;
 }
 
 export interface ChannelProviderStatus {
@@ -105,7 +107,38 @@ async function sendVoiceWithTwilio(to: string, message: string): Promise<{ id: s
   return { id: body?.sid == null ? null : String(body.sid), response: body };
 }
 
+async function reserveCustomerContactSlot(client: PoolClient, input: {
+  caseId: number;
+  customerEmail: string;
+  channel: RecoveryChannel;
+}): Promise<number> {
+  await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [input.customerEmail]);
+  const contacts = await client.query(
+    `SELECT COUNT(*) AS count
+     FROM outbound_contacts
+     WHERE customer_email = $1
+       AND sent_at >= now() - interval '24 hours'`,
+    [input.customerEmail]
+  );
+  if (Number(contacts.rows[0]?.count ?? 0) >= POLICY_LIMITS.maxContactsPerDay) {
+    throw new Error(`Deterministic contact cap reached (${POLICY_LIMITS.maxContactsPerDay}/24h)`);
+  }
+  const reservation = await client.query(
+    `INSERT INTO outbound_contacts (case_id, customer_email, channel, purpose, delivery_state)
+     VALUES ($1, $2, $3, 'recovery', 'pending')
+     RETURNING id`,
+    [input.caseId, input.customerEmail, input.channel]
+  );
+  return Number(reservation.rows[0].id);
+}
+
 export async function sendRecoveryChannel(pool: Pool, input: ChannelSendInput) {
+  const now = input.now ?? new Date();
+  if (isQuietHours(now)) {
+    const nextAllowed = nextAllowedContactTime(now);
+    throw new Error(`Quiet-hours policy blocks manual channel delivery until ${nextAllowed.toISOString()}`);
+  }
+
   const caseResult = await pool.query(
     `SELECT rc.id, rc.original_event_id, rc.customer_email, rc.amount_at_risk, rc.recovered_amount,
             rc.status,
@@ -119,7 +152,9 @@ export async function sendRecoveryChannel(pool: Pool, input: ChannelSendInput) {
      ) d ON true
      LEFT JOIN LATERAL (
        SELECT response FROM actions
-       WHERE starts_with(idempotency_key, rc.original_event_id || '_') AND status = 'SUCCESS'
+       WHERE starts_with(idempotency_key, rc.original_event_id || '_')
+         AND razorpay_api_call = 'payment_links.create'
+         AND status = 'success'
        ORDER BY id DESC LIMIT 1
      ) a ON true
      WHERE rc.id = $1`,
@@ -128,9 +163,6 @@ export async function sendRecoveryChannel(pool: Pool, input: ChannelSendInput) {
   if (caseResult.rows.length === 0) throw new Error(`Recovery case ${input.caseId} does not exist`);
   const row = caseResult.rows[0];
   if (["RECOVERED", "STOPPED", "ESCALATED"].includes(String(row.status))) throw new Error(`Recovery case is terminal (${row.status}); outbound contact is not allowed`);
-
-  const contacts = await pool.query(`SELECT COUNT(*) AS count FROM outbound_contacts WHERE case_id = $1 AND sent_at >= now() - interval '24 hours'`, [input.caseId]);
-  if (Number(contacts.rows[0]?.count ?? 0) >= POLICY_LIMITS.maxContactsPerDay) throw new Error(`Deterministic contact cap reached (${POLICY_LIMITS.maxContactsPerDay}/24h)`);
 
   const email = row.customer_email == null ? null : String(row.customer_email);
   const phone = row.phone == null ? null : String(row.phone);
@@ -145,12 +177,29 @@ export async function sendRecoveryChannel(pool: Pool, input: ChannelSendInput) {
 
   const status = getChannelProviderStatus().find((item) => item.channel === input.channel)!;
   const idempotencyKey = `${row.original_event_id}_${input.channel}_${randomUUID()}`;
-  const claimed = await pool.query(
-    `INSERT INTO channel_deliveries (case_id, event_id, channel, recipient, message, provider, status, idempotency_key)
-     VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', $7) RETURNING id`,
-    [input.caseId, row.original_event_id, input.channel, recipient, message, status.provider, idempotencyKey]
-  );
-  const deliveryId = Number(claimed.rows[0].id);
+  const client = await pool.connect();
+  let contactId: number | null = null;
+  let deliveryId: number | null = null;
+  try {
+    await client.query("BEGIN");
+    contactId = await reserveCustomerContactSlot(client, {
+      caseId: input.caseId,
+      customerEmail: email ?? recipient,
+      channel: input.channel,
+    });
+    const claimed = await client.query(
+      `INSERT INTO channel_deliveries (case_id, event_id, channel, recipient, message, provider, status, idempotency_key)
+       VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', $7) RETURNING id`,
+      [input.caseId, row.original_event_id, input.channel, recipient, message, status.provider, idempotencyKey]
+    );
+    deliveryId = Number(claimed.rows[0].id);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 
   try {
     let providerMessageId: string | null = null;
@@ -163,10 +212,11 @@ export async function sendRecoveryChannel(pool: Pool, input: ChannelSendInput) {
       finalStatus = "ACCEPTED";
     }
     await pool.query(`UPDATE channel_deliveries SET status = $2, provider_message_id = $3, response = $4, updated_at = now() WHERE id = $1`, [deliveryId, finalStatus, providerMessageId, providerResponse]);
-    await pool.query(`INSERT INTO outbound_contacts (case_id, customer_email, channel, purpose, delivery_state) VALUES ($1, $2, $3, 'recovery', $4)`, [input.caseId, email ?? recipient, input.channel, finalStatus.toLowerCase()]);
+    await pool.query(`UPDATE outbound_contacts SET delivery_state = $2 WHERE id = $1`, [contactId, finalStatus.toLowerCase()]);
     return { id: deliveryId, channel: input.channel, recipient, provider: status.provider, live: status.live, status: finalStatus, providerMessageId, message };
   } catch (error: any) {
     await pool.query(`UPDATE channel_deliveries SET status = 'FAILED', response = $2, updated_at = now() WHERE id = $1`, [deliveryId, { error: error.message }]);
+    if (contactId != null) await pool.query("DELETE FROM outbound_contacts WHERE id = $1 AND delivery_state = 'pending'", [contactId]);
     throw error;
   }
 }

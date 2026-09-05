@@ -26,6 +26,22 @@
 
     <section id="overview" class="app-view active">
       <div class="metric-grid" id="metrics"></div>
+
+      <section class="panel">
+        <div class="panel-head responsive">
+          <div><span class="kicker">Provider-backed validation · Razorpay Test Mode</span><h2>Fresh reconciliation run — PASS</h2></div>
+          <div><strong>₹1,156 recovered</strong></div>
+        </div>
+        <p>In a fresh Test Mode merchant environment, Recovery OS created 5 provider Payment Links. Four intentionally paid links were reconciled correctly, while one unpaid control stayed out of recovered revenue.</p>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>Provider links checked</th><th>Paid reconciled</th><th>Unpaid excluded</th><th>Recovered</th><th>Mismatches</th><th>Result</th></tr></thead>
+            <tbody><tr><td>5</td><td><b>4/4</b></td><td><b>1/1</b></td><td><b>₹1,156</b></td><td><b>0</b></td><td><span class="status RECOVERED">PASS</span></td></tr></tbody>
+          </table>
+        </div>
+        <p><small>Controlled provider-integration validation, not a production recovery-rate claim. Revenue is counted only when provider state and trusted recovery accounting agree.</small></p>
+      </section>
+
       <div class="dashboard-grid">
         <section class="panel recovered-panel"><div class="panel-head"><div><span class="kicker">Trusted outcomes</span><h2>Money recovered</h2></div><button class="link-button" data-jump="recoveries">View proof →</button></div><div class="recovered-total" id="recovered-total">₹—</div><p>Counted only after the paid-outcome contract is satisfied.</p><div id="recovery-preview"></div></section>
         <section class="panel"><div class="panel-head"><div><span class="kicker">Recovery intelligence</span><h2>Failure causes</h2></div></div><div id="cause-bars" class="bar-list"></div></section>
@@ -34,7 +50,7 @@
     </section>
 
     <section id="recoveries" class="app-view">
-      <div class="proof-banner"><div><span class="kicker">Strict recovery contract</span><h2>Every row here reached a trusted paid outcome.</h2><p>Visible only when status is RECOVERED, recovered amount is positive, recovery time exists, a Payment Link ID is present, and terminal reason is <code>trusted_payment_link_paid</code>.</p></div><div><strong id="proof-total">₹—</strong><span>trusted recovery ledger</span></div></div>
+      <div class="proof-banner"><div><span class="kicker">Strict recovery contract</span><h2>Every row here reached a trusted paid outcome.</h2><p>Visible only when status is RECOVERED, recovered amount is positive, recovery time exists, a Payment Link ID is present, and terminal reason is <code>trusted_payment_link_paid</code>. Latest fresh provider validation: <b>4/4 paid links reconciled, 1/1 unpaid control excluded, ₹1,156 provider-backed recovered amount, 0 mismatches.</b></p></div><div><strong id="proof-total">₹—</strong><span>trusted recovery ledger</span></div></div>
       <section class="panel"><div class="panel-head"><div><span class="kicker">Recovery ledger</span><h2>Recovered transactions</h2></div></div><div id="recovery-table" class="table-wrap"></div></section>
     </section>
 

@@ -9,7 +9,7 @@ export interface DecisionScenario {
   context: RecoveryPlanContext;
 }
 
-const base = {
+const base: Omit<RecoveryPlanContext, "trigger" | "rootCause"> = {
   confidence: 0.9,
   amountAtRisk: 250000,
   customerFailureCount: 1,
@@ -20,7 +20,7 @@ const base = {
   strategyEvidence: [],
   previousPlan: null,
   observation: null,
-} as const;
+};
 
 export const DECISION_SCENARIOS: DecisionScenario[] = [
   {

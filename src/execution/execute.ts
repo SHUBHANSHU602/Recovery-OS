@@ -15,6 +15,7 @@ interface ExecutionContext {
   finalAction: string;
   amount: number;
   customerEmail: string;
+  automatedRetryCount?: number;
 }
 
 const OPENING_MESSAGES: Record<string, string> = {
@@ -48,16 +49,18 @@ export async function executeAction(context: ExecutionContext): Promise<void> {
   }
 
   if (context.finalAction === "retry_now") {
+    const attemptNumber = Math.max(1, Math.floor((context.automatedRetryCount ?? 0) + 1));
     const result = await requestPaymentLink(
       context.eventId,
       "retry_now",
       context.interventionId,
-      `${context.eventId}_retry_now_attempt_1`
+      `${context.eventId}_retry_now_attempt_${attemptNumber}`
     );
     if (result.status === "executed") await scheduleReview(context, context.finalAction);
     await logAuditEvent(context.eventId, "execution_result", {
       interventionId: context.interventionId,
       finalAction: context.finalAction,
+      attemptNumber,
       result,
     });
     return;

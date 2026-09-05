@@ -11,6 +11,7 @@
     "evaluate": "tsx src/evaluation/runEvaluation.ts",
     "evaluate:competitive": "tsx src/evaluation/competitiveBenchmark.ts",
     "evaluate:ai": "tsx src/evaluation/aiDecisionBenchmark.ts",
+    "evaluate:provider": "tsx src/evaluation/providerReconciliation.ts",
     "test:policy": "tsx src/policy/testPolicyGate.ts",
     "test:verifier": "tsx src/verifier/testVerifier.ts",
     "test:dashboard": "tsx src/dashboard/testDashboard.ts",

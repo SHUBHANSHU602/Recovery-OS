@@ -118,6 +118,7 @@ async function main() {
     const auth = Buffer.from(`${keyId}:${keySecret}`).toString("base64");
     let providerPaid=0,providerUnpaid=0,paidCorrect=0,unpaidCorrect=0,providerBackedRecoveredPaise=0;
     const mismatches:string[]=[]; const caseIds=new Set<number>();
+    const providerPaidByCase = new Map<number, string[]>();
 
     console.log("\nRecovery OS — Razorpay provider reconciliation\n");
     console.log("link_id | provider | amount_paid | case | case_status | recovered_amount | verdict");
@@ -126,7 +127,9 @@ async function main() {
       const caseId=row.case_id==null?null:Number(row.case_id); if(caseId!=null)caseIds.add(caseId);
       const recoveredAmount=Number(row.recovered_amount??0); const currentCaseLink=row.razorpay_payment_link_id; let verdict="PASS";
       if(provider.status==="paid"&&provider.amount_paid>0){
-        providerPaid+=1; const expectedRecovered=Math.min(Number(row.amount_at_risk??provider.amount_paid),provider.amount_paid);
+        providerPaid+=1;
+        if(caseId!=null){const links=providerPaidByCase.get(caseId)??[];links.push(provider.id);providerPaidByCase.set(caseId,links);}
+        const expectedRecovered=Math.min(Number(row.amount_at_risk??provider.amount_paid),provider.amount_paid);
         const valid=caseId!=null&&row.case_status==="RECOVERED"&&recoveredAmount===expectedRecovered&&row.terminal_reason==="trusted_payment_link_paid"&&currentCaseLink===provider.id;
         if(valid){paidCorrect+=1;providerBackedRecoveredPaise+=recoveredAmount;}else{verdict="MISMATCH";mismatches.push(`${provider.id}: provider is paid (${provider.amount_paid}) but ledger case=${caseId??"none"}, status=${row.case_status??"none"}, recovered=${recoveredAmount}, terminal=${row.terminal_reason??"none"}, currentLink=${currentCaseLink??"none"}`);}
       }else{
@@ -136,15 +139,22 @@ async function main() {
       console.log(`${provider.id} | ${provider.status} | ${rupees(provider.amount_paid)} | ${caseId??"-"} | ${row.case_status??"-"} | ${rupees(recoveredAmount)} | ${verdict}`);
     }
 
+    const duplicateProviderPaidCases = [...providerPaidByCase.entries()].filter(([,links])=>links.length>1);
+    for(const [caseId,links] of duplicateProviderPaidCases){
+      mismatches.push(`case ${caseId}: multiple provider-paid recovery links detected (${links.join(', ')}). This is a duplicate-payment integrity violation.`);
+    }
+
     console.log("\nSummary");
     console.log(`Provider links checked: ${rows.length}`); console.log(`Provider-paid links: ${providerPaid}`); console.log(`Provider-unpaid links: ${providerUnpaid}`);
     console.log(`Paid links correctly reconciled: ${paidCorrect}/${providerPaid}`); console.log(`Unpaid links not falsely attributed to recovered revenue: ${unpaidCorrect}/${providerUnpaid}`);
+    console.log(`Cases with multiple provider-paid recovery links: ${duplicateProviderPaidCases.length}`);
     console.log(`Provider-backed recovered amount: ${rupees(providerBackedRecoveredPaise)}`); console.log(`Mismatches: ${mismatches.length}`);
     await printPortfolioMetrics(pool,[...caseIds]);
 
     if(mismatches.length){console.error("\nReconciliation mismatches:");for(const mismatch of mismatches)console.error(`- ${mismatch}`);throw new Error("Provider reconciliation FAILED");}
     assert.equal(paidCorrect,providerPaid,"Every provider-paid link must reconcile to trusted recovered accounting");
     assert.equal(unpaidCorrect,providerUnpaid,"No provider-unpaid link may be falsely attributed to recovered revenue");
+    assert.equal(duplicateProviderPaidCases.length,0,"No recovery case may have multiple provider-paid recovery links");
     console.log("\nPROVIDER RECONCILIATION RESULT: PASS");
   } finally { await pool.end(); }
 }

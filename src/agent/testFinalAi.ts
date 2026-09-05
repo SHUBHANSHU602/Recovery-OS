@@ -6,8 +6,38 @@ import { applyPolicyGate } from "../policy/policyGate";
 import { ensureRecoveryCase, ensureTrack3Schema } from "../recovery/recoveryStore";
 import { queueRecoveryReplan, scheduleBusinessOutcomeReview } from "../recovery/replanQueue";
 import { applySharedPolicy, DECISION_SCENARIOS, scoreActions, staticRulesBaseline } from "../evaluation/aiDecisionBenchmark";
-import { buildRecoveryPlannerPrompt, parseRecoveryPlan } from "./recoveryPlanner";
+import {
+  applyPlannerBusinessGuardrails,
+  buildRecoveryPlannerPrompt,
+  parseRecoveryPlan,
+  type RecoveryPlan,
+  type RecoveryPlanContext,
+} from "./recoveryPlanner";
 import { loadLatestRecoveryPlan, persistRecoveryPlan } from "./recoveryPlanStore";
+
+const samplePlan: RecoveryPlan = {
+  objective: "Recover safely.",
+  primary_action: "offer_alternate_payment_method",
+  fallback_action: "whatsapp_nudge",
+  reasoning: "Model recommendation for regression testing.",
+  escalation_criteria: ["bounded automation no longer appropriate"],
+  stop_conditions: ["trusted payment success", "original payment succeeds or customer opts out"],
+};
+
+const baseContext: RecoveryPlanContext = {
+  trigger: "initial_failure",
+  rootCause: "insufficient_funds",
+  confidence: 0.9,
+  amountAtRisk: 250000,
+  customerFailureCount: 1,
+  correlatedFailuresAtSameBank: 0,
+  automatedRetryCount: 0,
+  contactsLast24h: 0,
+  priorCustomerOutcomes: [],
+  strategyEvidence: [],
+  previousPlan: null,
+  observation: null,
+};
 
 async function main() {
   const parsed = parseRecoveryPlan(JSON.stringify({
@@ -46,6 +76,81 @@ async function main() {
   assert.match(prompt, /HTTP 429/);
   assert.match(prompt, /infrastructure concerns/);
   assert.match(prompt, /Comparable strategy outcomes/);
+  assert.match(prompt, /Decision priorities/);
+
+  // Business guardrails are context-derived invariants, not benchmark ids.
+  assert.equal(
+    applyPlannerBusinessGuardrails(
+      { ...baseContext, trigger: "intervention_unresolved", rootCause: "systemic_bank_outage", automatedRetryCount: 3 },
+      samplePlan
+    ).primary_action,
+    "escalate_to_human"
+  );
+  assert.equal(
+    applyPlannerBusinessGuardrails(
+      { ...baseContext, rootCause: "ambiguous", confidence: 0.25 },
+      samplePlan
+    ).primary_action,
+    "escalate_to_human"
+  );
+  assert.equal(
+    applyPlannerBusinessGuardrails(baseContext, samplePlan).primary_action,
+    "whatsapp_nudge"
+  );
+  assert.equal(
+    applyPlannerBusinessGuardrails(
+      {
+        ...baseContext,
+        trigger: "promise_due_unpaid",
+        rootCause: "insufficient_funds",
+        contactsLast24h: 1,
+        observation: { outcome: "promise_due_and_case_still_unresolved" },
+      },
+      samplePlan
+    ).primary_action,
+    "escalate_to_human"
+  );
+  assert.equal(
+    applyPlannerBusinessGuardrails(
+      {
+        ...baseContext,
+        trigger: "intervention_unresolved",
+        rootCause: "insufficient_funds",
+        observation: { priorAction: "whatsapp_nudge", outcome: "unresolved" },
+        strategyEvidence: [
+          { strategy: "whatsapp_nudge", cases: 8, recoveries: 1, recoveryRate: 12.5, recoveredAmount: 120000 },
+          { strategy: "retry_with_backoff", cases: 9, recoveries: 5, recoveryRate: 55.6, recoveredAmount: 740000 },
+        ],
+      },
+      samplePlan
+    ).primary_action,
+    "retry_with_backoff"
+  );
+  assert.equal(
+    applyPlannerBusinessGuardrails(
+      {
+        ...baseContext,
+        trigger: "intervention_unresolved",
+        rootCause: "systemic_bank_outage",
+        correlatedFailuresAtSameBank: 4,
+        automatedRetryCount: 1,
+        observation: { priorAction: "retry_with_backoff", outcome: "unresolved_after_business_review" },
+        previousPlan: {
+          version: 1,
+          trigger: "initial_failure",
+          objective: "wait through outage",
+          primaryAction: "retry_with_backoff",
+          fallbackAction: "escalate_to_human",
+          reasoning: "outage evidence",
+        },
+        strategyEvidence: [
+          { strategy: "retry_with_backoff", cases: 10, recoveries: 1, recoveryRate: 10, recoveredAmount: 90000 },
+        ],
+      },
+      samplePlan
+    ).primary_action,
+    "escalate_to_human"
+  );
 
   const baseline = scoreActions(
     DECISION_SCENARIOS.map((scenario) =>

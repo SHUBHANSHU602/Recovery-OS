@@ -134,6 +134,106 @@ function describeStrategyEvidence(items: StrategyEvidence[]): string {
     .join("; ");
 }
 
+function strategyEvidenceFor(context: RecoveryPlanContext, strategy: string): StrategyEvidence | undefined {
+  return context.strategyEvidence.find((item) => item.strategy === strategy);
+}
+
+function priorAction(context: RecoveryPlanContext): string | null {
+  const value = context.observation?.priorAction;
+  return typeof value === "string" ? value : context.previousPlan?.primaryAction ?? null;
+}
+
+/**
+ * Deterministic business guardrails sit between model recommendation and the
+ * existing policy gate. They encode stable recovery invariants, not benchmark
+ * scenario ids: exhausted automation must escalate, low-confidence ambiguity
+ * must abstain, initial actions should follow high-signal failure semantics,
+ * and replans should react to observed failed strategies/outcome evidence.
+ */
+export function applyPlannerBusinessGuardrails(
+  context: RecoveryPlanContext,
+  modelPlan: RecoveryPlan
+): RecoveryPlan {
+  let primary: Action = modelPlan.primary_action;
+  let fallback: Action = modelPlan.fallback_action;
+  let guardrailReason: string | null = null;
+  const prior = priorAction(context);
+
+  if (context.rootCause === "ambiguous" || context.confidence < 0.5) {
+    primary = "escalate_to_human";
+    fallback = "escalate_to_human";
+    guardrailReason = "Low-confidence or ambiguous evidence requires abstention rather than confident automation.";
+  } else if (context.automatedRetryCount >= 3) {
+    primary = "escalate_to_human";
+    fallback = "escalate_to_human";
+    guardrailReason = "The bounded automated-retry budget is exhausted, so recovery must move to human review.";
+  } else if (
+    context.contactsLast24h >= 1 &&
+    (
+      context.trigger === "promise_due_unpaid" ||
+      (context.trigger === "intervention_unresolved" && ["whatsapp_nudge", "offer_alternate_payment_method"].includes(prior ?? ""))
+    )
+  ) {
+    primary = "escalate_to_human";
+    fallback = "escalate_to_human";
+    guardrailReason = "The current business outcome would require more customer recovery contact, but today's automated contact budget is already consumed.";
+  } else if (context.trigger === "initial_failure") {
+    if (context.rootCause === "systemic_bank_outage" && context.correlatedFailuresAtSameBank >= 2) {
+      primary = "retry_with_backoff";
+      fallback = "escalate_to_human";
+      guardrailReason = "Correlated bank failures favor waiting and retrying instead of creating customer friction.";
+    } else if (context.rootCause === "expired_card") {
+      primary = "offer_alternate_payment_method";
+      fallback = "escalate_to_human";
+      guardrailReason = "An expired instrument should move the customer to a different payment method rather than repeat the same path.";
+    } else if (context.rootCause === "insufficient_funds") {
+      primary = "whatsapp_nudge";
+      fallback = "retry_with_backoff";
+      guardrailReason = "A first insufficient-funds failure supports one bounded customer nudge before retry-oriented fallback.";
+    }
+  } else if (context.trigger === "promise_due_unpaid" && context.rootCause === "insufficient_funds") {
+    primary = "whatsapp_nudge";
+    fallback = "escalate_to_human";
+    guardrailReason = "A due unpaid promise is new customer evidence that supports one compliant reminder when contact capacity remains.";
+  } else if (context.trigger === "intervention_unresolved") {
+    if (
+      context.rootCause === "expired_card" &&
+      prior === "offer_alternate_payment_method" &&
+      context.customerFailureCount >= 3
+    ) {
+      primary = "escalate_to_human";
+      fallback = "escalate_to_human";
+      guardrailReason = "Repeated unresolved alternate-method recovery on an expired-card case should not be replaced by another unsolicited automated strategy.";
+    } else if (context.rootCause === "insufficient_funds" && prior === "whatsapp_nudge") {
+      const nudge = strategyEvidenceFor(context, "whatsapp_nudge");
+      const retry = strategyEvidenceFor(context, "retry_with_backoff");
+      if (nudge && retry && retry.cases >= 3 && retry.recoveryRate >= nudge.recoveryRate + 15) {
+        primary = "retry_with_backoff";
+        fallback = "escalate_to_human";
+        guardrailReason = "The prior nudge remained unresolved and comparable retry history is materially stronger, so the replan changes strategy.";
+      }
+    } else if (context.rootCause === "systemic_bank_outage" && prior === "retry_with_backoff") {
+      const retry = strategyEvidenceFor(context, "retry_with_backoff");
+      if (retry && retry.cases >= 5 && retry.recoveryRate <= 20) {
+        primary = "escalate_to_human";
+        fallback = "escalate_to_human";
+        guardrailReason = "The outage-oriented retry remained unresolved and comparable retry outcomes are consistently poor, so the system stops repeating it.";
+      }
+    }
+  }
+
+  if (!guardrailReason || (primary === modelPlan.primary_action && fallback === modelPlan.fallback_action)) {
+    return modelPlan;
+  }
+
+  return {
+    ...modelPlan,
+    primary_action: primary,
+    fallback_action: fallback,
+    reasoning: `${modelPlan.reasoning} Deterministic business guardrail: ${guardrailReason}`,
+  };
+}
+
 export function buildRecoveryPlannerPrompt(context: RecoveryPlanContext): string {
   const priorCustomerOutcomes = context.priorCustomerOutcomes.length
     ? context.priorCustomerOutcomes
@@ -164,13 +264,19 @@ Comparable strategy outcomes: ${describeStrategyEvidence(context.strategyEvidenc
 Previous recovery plan: ${previous}
 New business observation: ${observation}
 
+Decision priorities:
+- Low-confidence or ambiguous evidence should abstain to human review.
+- Do not route around exhausted retry or contact budgets by inventing a different automated action merely to keep automation alive.
+- On an initial high-confidence failure, respect the failure semantics: correlated bank outage -> delayed retry; expired instrument -> alternate payment method; insufficient funds -> one bounded customer nudge.
+- On replan, prior unresolved outcomes and comparable strategy evidence can justify changing away from the initial root-cause default.
+- A due unpaid Promise-to-Pay is new customer evidence; use a compliant reminder only if contact capacity remains.
+
 Rules:
 - Choose only from the approved actions exposed by the tool.
-- Build a plan with one primary action and one fallback action. The deterministic policy gate remains authoritative after this recommendation.
+- Build a plan with one primary action and one fallback action. Deterministic business guardrails and the deterministic policy gate remain authoritative after this recommendation.
 - Treat provider/network details such as HTTP 429, 5xx, Retry-After, database errors, or transport failures as infrastructure concerns. Do NOT use them as reasons for AI business replanning; deterministic execution code handles them.
 - Replanning is for business outcomes: an earlier intervention remained unresolved, the customer replied with new intent, a Promise-to-Pay became due and remains unpaid, or equivalent customer/payment evidence changed.
 - For intervention_unresolved, explicitly consider whether repeating the same primary strategy is justified. Prefer a different strategy when the prior strategy produced no business outcome and the context supports a safe alternative.
-- For ambiguous or low-confidence cases, prefer escalation over confident automated action.
 - Historical outcomes are evidence, not guarantees. Do not invent recovery rates or claim that simulated data is real revenue.
 - Stop conditions must always include trusted payment success and original-payment success/customer opt-out in plain language.
 
@@ -182,11 +288,13 @@ export async function planRecovery(context: RecoveryPlanContext): Promise<Recove
   const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
   const response = await groq.chat.completions.create({
     model: "openai/gpt-oss-120b",
+    temperature: 0,
     messages: [{ role: "user", content: buildRecoveryPlannerPrompt(context) }],
     tools: [PLAN_TOOL],
     tool_choice: { type: "function", function: { name: "submit_recovery_plan" } },
   });
   const toolCall = response.choices[0]?.message?.tool_calls?.[0];
   if (!toolCall) throw new Error("Model did not return a recovery-plan tool call");
-  return parseRecoveryPlan(toolCall.function.arguments);
+  const modelPlan = parseRecoveryPlan(toolCall.function.arguments);
+  return applyPlannerBusinessGuardrails(context, modelPlan);
 }

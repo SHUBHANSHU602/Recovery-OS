@@ -74,33 +74,47 @@ async function main() {
     );
     assert.equal(Number(persistedPriority.rows[0].expected_recovery_value), priority.expectedRecoveryValue);
 
-    const dueAt = new Date(Date.now() + 2 * 60 * 60 * 1000);
-    const promise = await createPromiseToPay(pool, {
+    const firstDueAt = new Date(Date.now() + 2 * 60 * 60 * 1000);
+    const firstPromise = await createPromiseToPay(pool, {
       caseId: Number(caseId),
       promisedAmount: 7500,
-      dueAt,
+      dueAt: firstDueAt,
       source: "phase_b_test",
       note: "customer promised later payment",
     });
-    assert.equal(promise.promisedAmount, 7500);
+    assert.equal(firstPromise.promisedAmount, 7500);
+
+    const secondDueAt = new Date(Date.now() + 4 * 60 * 60 * 1000);
+    const secondPromise = await createPromiseToPay(pool, {
+      caseId: Number(caseId),
+      promisedAmount: 6000,
+      dueAt: secondDueAt,
+      source: "phase_b_test",
+      note: "customer replaced the earlier promise",
+    });
+    assert.equal(secondPromise.promisedAmount, 6000);
 
     const promises = await listPromisesForCase(pool, Number(caseId));
-    assert.equal(promises.length, 1);
-    assert.equal(promises[0].status, "PENDING");
+    assert.equal(promises.length, 2);
+    const persistedFirst = promises.find((item) => item.id === firstPromise.id);
+    const persistedSecond = promises.find((item) => item.id === secondPromise.id);
+    assert.equal(persistedFirst?.status, "CANCELLED");
+    assert.equal(persistedSecond?.status, "PENDING");
 
     const scheduled = await pool.query(
-      `SELECT desired_action, status FROM scheduled_actions
-       WHERE case_id = $1 AND desired_action = 'promise_to_pay_reminder'`,
+      `SELECT schedule_key, status FROM scheduled_actions
+       WHERE case_id = $1 AND desired_action = 'promise_to_pay_reminder'
+       ORDER BY id`,
       [caseId]
     );
-    assert.equal(scheduled.rows.length, 1);
-    assert.equal(scheduled.rows[0].status, "PENDING");
+    assert.equal(scheduled.rows.length, 2);
+    const firstReminder = scheduled.rows.find((row) => String(row.schedule_key).includes(`promise_${firstPromise.id}_reminder`));
+    const secondReminder = scheduled.rows.find((row) => String(row.schedule_key).includes(`promise_${secondPromise.id}_reminder`));
+    assert.equal(firstReminder?.status, "CANCELLED");
+    assert.equal(secondReminder?.status, "PENDING");
 
     console.log("Phase B intelligence tests passed.");
   } finally {
-    // createPromiseToPay owns an internal transaction, so wrapping this whole
-    // test in an outer transaction is unsafe: its COMMIT would also commit the
-    // fixture. Clean up explicitly by stable event identity instead.
     if (eventId) {
       await pool.query("DELETE FROM recovery_cases WHERE original_event_id = $1", [eventId]);
       await pool.query("DELETE FROM events WHERE event_id = $1", [eventId]);

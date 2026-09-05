@@ -39,12 +39,24 @@ export async function createPromiseToPay(pool: Pool, input: PromiseToPayInput) {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query(
+    const replaced = await client.query(
       `UPDATE payment_promises
        SET status = 'CANCELLED', cancelled_at = now(), updated_at = now()
-       WHERE case_id = $1 AND status = 'PENDING'`,
+       WHERE case_id = $1 AND status = 'PENDING'
+       RETURNING id`,
       [input.caseId]
     );
+
+    if (replaced.rows.length > 0) {
+      const staleReminderKeys = replaced.rows.map((item) => `${eventId}_promise_${Number(item.id)}_reminder`);
+      await client.query(
+        `UPDATE scheduled_actions
+         SET status = 'CANCELLED', updated_at = now()
+         WHERE schedule_key = ANY($1::text[])
+           AND status = 'PENDING'`,
+        [staleReminderKeys]
+      );
+    }
 
     const inserted = await client.query(
       `INSERT INTO payment_promises
@@ -72,6 +84,7 @@ export async function createPromiseToPay(pool: Pool, input: PromiseToPayInput) {
       reminderAt: reminderAt.toISOString(),
       source: input.source ?? "merchant_or_agent",
       note: input.note ?? null,
+      replacedPromiseIds: replaced.rows.map((item) => Number(item.id)),
     });
 
     return {

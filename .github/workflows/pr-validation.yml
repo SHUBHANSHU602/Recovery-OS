@@ -6,6 +6,7 @@ on:
       - track3-hardening-p1
       - track3-genuine-recovery-evaluation
       - phase-a-merchant-dashboard
+      - baseline-hardening-post-merge
   pull_request:
     branches:
       - main
@@ -60,7 +61,7 @@ jobs:
       - name: Deterministic core tests
         run: npm run test:core
 
-      - name: Smoke-test server, dashboard and background worker
+      - name: Smoke-test server, dashboard, channels and background worker
         shell: bash
         run: |
           set -euo pipefail
@@ -77,7 +78,10 @@ jobs:
           curl --fail --silent --show-error http://localhost:3000/health | grep '"status":"ok"'
           curl --fail --silent --show-error http://localhost:3000/api/dashboard/summary | grep '"totalCases"'
           curl --fail --silent --show-error http://localhost:3000/api/dashboard/cases | grep '"cases"'
+          curl --fail --silent --show-error http://localhost:3000/api/channels/status | grep '"providers"'
+          curl --fail --silent --show-error 'http://localhost:3000/api/channels/deliveries?limit=5' | grep '"items"'
           curl --fail --silent --show-error http://localhost:3000/ | grep 'Revenue Recovery Command Center'
+          curl --fail --silent --show-error http://localhost:3000/channels.html | grep 'Recovery Channels'
 
           if grep -E "Recovery worker (startup|poll) failed|Unhandled|uncaught" server.log; then
             cat server.log

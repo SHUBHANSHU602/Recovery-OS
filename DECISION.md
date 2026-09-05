@@ -163,7 +163,7 @@
 
 ### Promise-to-Pay is a durable recovery commitment
 - **Decision:** customer payment promises are persisted with amount, due time, source, status, and an associated reminder job.
-- Only one pending promise is active per recovery case; a replacement cancels the previous pending promise.
+- Only one pending promise is active per recovery case; a replacement cancels the previous pending promise and its still-pending reminder before scheduling the replacement reminder.
 - A trusted recovery outcome fulfills the pending promise and cancels remaining scheduled work for that case.
 - Rationale: "I will pay later" is not a chat message to forget; it is a financial workflow state that must survive restarts and stop once payment is confirmed.
 
@@ -180,6 +180,25 @@
 - **Decision:** Phase B records/defer-schedules outbound contacts but does not pretend WhatsApp/SMS/email/voice are live provider integrations.
 - Real channel delivery belongs to Phase C and will use the same policy and scheduling boundaries.
 
+## Phase C — Omnichannel recovery — 2026-09-05
+
+### Channels share one recovery boundary
+- **Decision:** email, SMS, WhatsApp and voice use one channel service instead of separate feature-specific side-effect paths.
+- Every send reloads trusted recovery-case/customer data, rejects terminal cases, enforces quiet hours, and atomically reserves the customer-wide 24-hour contact slot before provider execution.
+- Rationale: adding more channels must not create four new ways to bypass recovery policy, and concurrent requests must not both pass a check-before-send race.
+
+### Provider availability is explicit, never implied
+- **Decision:** email uses Resend when configured; SMS, WhatsApp and voice use Twilio when configured. Missing credentials produce an explicitly `SIMULATED` delivery rather than pretending a provider send occurred.
+- Rationale: demo breadth is useful only if provider claims remain honest and machine-visible.
+
+### Channel delivery is not revenue recovery
+- **Decision:** `channel_deliveries` records communication attempts only. No accepted message, SMS, WhatsApp send, email, or voice call changes `recovery_cases.recovered_amount` or `RECOVERED` state.
+- Rationale: the existing trusted Razorpay paid-outcome contract remains the only source of recovered revenue.
+
+### Recovery messages only surface trusted successful Payment Links
+- **Decision:** the channel service looks up only `actions` rows where `razorpay_api_call = 'payment_links.create'` and `status = 'success'` before placing a short URL in an outbound message.
+- Rationale: the previous merged query used the wrong status casing and could omit a valid link; filtering by action type also avoids accidentally selecting an unrelated later successful action.
+
 ## Phase D — Competitive evaluation — 2026-09-05
 
 ### Offline benchmark and provider-confirmed revenue are separate evidence classes
@@ -193,3 +212,15 @@
 ### Recovery probabilities are assumptions, not empirical claims
 - **Decision:** cause-specific control/treatment probabilities are declared in source and documentation as benchmark assumptions.
 - Rationale: simulated lift is useful for testing evaluation mechanics, but it must not be described as observed merchant performance or real recovered money.
+
+## Post-merge baseline hardening — 2026-09-05
+
+### Green CI is necessary but test composition must also be preserved
+- **Decision:** `test:core` explicitly includes policy, verifier, dashboard, intelligence, channels, and competitive-benchmark suites.
+- CI also smoke-tests the channel console and channel APIs, not only the merchant dashboard.
+- Rationale: PR #10 remained green after its merge resolution dropped `test:channels`; a green aggregate command is only meaningful if every intended suite still participates.
+
+### Customer contact caps are claimed before provider execution
+- **Decision:** Phase C obtains a per-customer PostgreSQL advisory transaction lock, checks the 24-hour contact count, and inserts a `pending` outbound-contact reservation before calling an external communication provider.
+- Provider success converts the reservation to the final delivery state; provider failure releases the pending reservation.
+- Rationale: a check-then-send flow allowed concurrent requests to both observe room under the cap and contact the same customer twice.

@@ -5,7 +5,7 @@ import { Pool } from "pg";
 import { applyPolicyGate } from "../policy/policyGate";
 import { ensureRecoveryCase, ensureTrack3Schema } from "../recovery/recoveryStore";
 import { queueRecoveryReplan, scheduleBusinessOutcomeReview } from "../recovery/replanQueue";
-import { DECISION_SCENARIOS, scoreActions, staticRulesBaseline } from "../evaluation/aiDecisionBenchmark";
+import { applySharedPolicy, DECISION_SCENARIOS, scoreActions, staticRulesBaseline } from "../evaluation/aiDecisionBenchmark";
 import { buildRecoveryPlannerPrompt, parseRecoveryPlan } from "./recoveryPlanner";
 import { loadLatestRecoveryPlan, persistRecoveryPlan } from "./recoveryPlanStore";
 
@@ -47,9 +47,13 @@ async function main() {
   assert.match(prompt, /infrastructure concerns/);
   assert.match(prompt, /Comparable strategy outcomes/);
 
-  const baseline = scoreActions(DECISION_SCENARIOS.map((scenario) => staticRulesBaseline(scenario.context.rootCause)));
-  assert.equal(baseline.total, 10);
-  assert.equal(baseline.correct, 6);
+  const baseline = scoreActions(
+    DECISION_SCENARIOS.map((scenario) =>
+      applySharedPolicy(staticRulesBaseline(scenario.context.rootCause), scenario.context)
+    )
+  );
+  assert.equal(baseline.total, 12);
+  assert.equal(baseline.correct, 9);
 
   const pool = new Pool();
   let eventId: string | null = null;

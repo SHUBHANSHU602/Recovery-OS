@@ -8,6 +8,7 @@ import { applyPolicyGate } from "../policy/policyGate";
 import { loadPolicyContext } from "../policy/policyContext";
 import { executeAction } from "../execution/execute";
 import { logAuditEvent } from "../ledger/auditLog";
+import { refreshRecoveryPriority } from "../intelligence/recoveryIntelligence";
 import { ensureRecoveryCase, ensureTrack3Schema, setRecoveryState } from "./recoveryStore";
 
 const pool = new Pool();
@@ -59,7 +60,7 @@ export async function processRecoveryCase(eventId: string): Promise<void> {
 
     const diagnosis = diagnosisRow.rows[0];
     let interventionRow = await pool.query(
-      "SELECT id, final_action FROM interventions WHERE diagnosis_id = $1 ORDER BY id DESC LIMIT 1",
+      "SELECT id, chosen_action, final_action FROM interventions WHERE diagnosis_id = $1 ORDER BY id DESC LIMIT 1",
       [diagnosis.id]
     );
 
@@ -112,14 +113,17 @@ export async function processRecoveryCase(eventId: string): Promise<void> {
       });
       interventionRow = await pool.query(
         `INSERT INTO interventions (diagnosis_id, chosen_action, reasoning, policy_check_result, final_action)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id, final_action`,
+         VALUES ($1, $2, $3, $4, $5) RETURNING id, chosen_action, final_action`,
         [diagnosis.id, chosen.chosen_action, chosen.reasoning, policy.result, policy.finalAction]
       );
     }
 
+    const intervention = interventionRow.rows[0];
+    const priority = await refreshRecoveryPriority(pool, caseId, String(intervention.chosen_action));
+    await logAuditEvent(eventId, "recovery_priority_scored", priority);
+
     const eventResult = await pool.query("SELECT payload FROM events WHERE event_id = $1", [eventId]);
     const payment = eventResult.rows[0].payload.payload.payment.entity;
-    const intervention = interventionRow.rows[0];
     await executeAction({
       eventId,
       interventionId: Number(intervention.id),

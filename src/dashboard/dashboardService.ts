@@ -20,6 +20,9 @@ function normalizeCaseRow(row: any) {
     customerEmail: row.customer_email == null ? null : String(row.customer_email),
     amountAtRisk: asNumber(row.amount_at_risk),
     recoveredAmount: asNumber(row.recovered_amount),
+    recoveryProbability: row.recovery_probability == null ? null : Number(row.recovery_probability),
+    expectedRecoveryValue: row.expected_recovery_value == null ? null : asNumber(row.expected_recovery_value),
+    priorityUpdatedAt: row.priority_updated_at ?? null,
     strategy: row.strategy == null ? null : String(row.strategy),
     status: String(row.status),
     terminalReason: row.terminal_reason == null ? null : String(row.terminal_reason),
@@ -40,6 +43,14 @@ function normalizeCaseRow(row: any) {
     errorDescription: row.error_description == null ? null : String(row.error_description),
     bank: row.bank == null ? null : String(row.bank),
     currency: row.currency == null ? null : String(row.currency),
+    activePromise: row.promise_id == null ? null : {
+      id: asNumber(row.promise_id),
+      promisedAmount: asNumber(row.promised_amount),
+      dueAt: row.promise_due_at,
+      status: String(row.promise_status),
+      source: String(row.promise_source),
+      note: row.promise_note == null ? null : String(row.promise_note),
+    },
   };
 }
 
@@ -54,6 +65,12 @@ const CASE_SELECT = `
     sa.next_run_at,
     he.status AS escalation_status,
     he.reason AS escalation_reason,
+    pp.id AS promise_id,
+    pp.promised_amount,
+    pp.due_at AS promise_due_at,
+    pp.status AS promise_status,
+    pp.source AS promise_source,
+    pp.note AS promise_note,
     e.payload->'payload'->'payment'->'entity'->>'error_code' AS error_code,
     e.payload->'payload'->'payment'->'entity'->>'error_description' AS error_description,
     e.payload->'payload'->'payment'->'entity'->>'bank' AS bank,
@@ -79,6 +96,13 @@ const CASE_SELECT = `
     FROM scheduled_actions
     WHERE case_id = rc.id AND status = 'PENDING'
   ) sa ON true
+  LEFT JOIN LATERAL (
+    SELECT id, promised_amount, due_at, status, source, note
+    FROM payment_promises
+    WHERE case_id = rc.id AND status = 'PENDING'
+    ORDER BY due_at ASC
+    LIMIT 1
+  ) pp ON true
   LEFT JOIN human_escalations he ON he.case_id = rc.id
 `;
 
@@ -87,6 +111,7 @@ export async function getDashboardSummary(pool: Pool) {
     SELECT
       COUNT(*) AS total_cases,
       COALESCE(SUM(amount_at_risk), 0) AS revenue_at_risk,
+      COALESCE(SUM(expected_recovery_value) FILTER (WHERE status NOT IN ('RECOVERED', 'STOPPED', 'ESCALATED')), 0) AS expected_recovery_value,
       COALESCE(SUM(
         CASE WHEN ${TRUSTED_RECOVERY_SQL}
           THEN LEAST(amount_at_risk, recovered_amount)
@@ -97,7 +122,8 @@ export async function getDashboardSummary(pool: Pool) {
       COUNT(*) FILTER (WHERE status = 'ESCALATED') AS escalated_cases,
       COUNT(*) FILTER (WHERE status = 'WAITING_FOR_OUTCOME') AS waiting_cases,
       COUNT(*) FILTER (WHERE status = 'SCHEDULED') AS scheduled_cases,
-      COUNT(*) FILTER (WHERE status NOT IN ('RECOVERED', 'STOPPED', 'ESCALATED')) AS open_cases
+      COUNT(*) FILTER (WHERE status NOT IN ('RECOVERED', 'STOPPED', 'ESCALATED')) AS open_cases,
+      COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM payment_promises pp WHERE pp.case_id = recovery_cases.id AND pp.status = 'PENDING')) AS active_promises
     FROM recovery_cases
   `);
 
@@ -157,7 +183,7 @@ export async function getDashboardSummary(pool: Pool) {
     FROM labeled
   `);
 
-  const recentResult = await pool.query(`${CASE_SELECT} ORDER BY rc.updated_at DESC LIMIT 6`);
+  const recentResult = await pool.query(`${CASE_SELECT} ORDER BY COALESCE(rc.expected_recovery_value, 0) DESC, rc.updated_at DESC LIMIT 6`);
 
   const row = metrics.rows[0] ?? {};
   const atRisk = asNumber(row.revenue_at_risk);
@@ -169,6 +195,7 @@ export async function getDashboardSummary(pool: Pool) {
     generatedAt: new Date().toISOString(),
     totalCases: asNumber(row.total_cases),
     revenueAtRisk: atRisk,
+    expectedRecoveryValue: asNumber(row.expected_recovery_value),
     confirmedRecovered: recovered,
     valueRecoveryRate: atRisk > 0 ? (recovered / atRisk) * 100 : 0,
     recoveredCases: asNumber(row.recovered_cases),
@@ -176,6 +203,7 @@ export async function getDashboardSummary(pool: Pool) {
     waitingCases: asNumber(row.waiting_cases),
     scheduledCases: asNumber(row.scheduled_cases),
     escalatedCases: asNumber(row.escalated_cases),
+    activePromises: asNumber(row.active_promises),
     diagnosisAccuracy: labeledTotal > 0 ? (labeledCorrect / labeledTotal) * 100 : null,
     diagnosisCorrect: labeledCorrect,
     diagnosisTotal: labeledTotal,
@@ -211,7 +239,7 @@ export async function listRecoveryCases(
   `;
 
   const [rowsResult, countResult] = await Promise.all([
-    pool.query(`${CASE_SELECT} ${where} ORDER BY rc.updated_at DESC LIMIT $3 OFFSET $4`, [status, search, limit, offset]),
+    pool.query(`${CASE_SELECT} ${where} ORDER BY COALESCE(rc.expected_recovery_value, 0) DESC, rc.updated_at DESC LIMIT $3 OFFSET $4`, [status, search, limit, offset]),
     pool.query(`SELECT COUNT(*) FROM recovery_cases rc ${where}`, [status, search]),
   ]);
 
@@ -266,6 +294,7 @@ export async function listHumanEscalations(pool: Pool, limit = 100) {
        he.resolved_at,
        rc.customer_email,
        rc.amount_at_risk,
+       rc.expected_recovery_value,
        rc.strategy,
        rc.status AS recovery_status,
        d.root_cause,
@@ -281,6 +310,7 @@ export async function listHumanEscalations(pool: Pool, limit = 100) {
      ) d ON true
      ORDER BY
        CASE he.status WHEN 'OPEN' THEN 0 ELSE 1 END,
+       COALESCE(rc.expected_recovery_value, 0) DESC,
        he.updated_at DESC
      LIMIT $1`,
     [boundedLimit]
@@ -292,6 +322,7 @@ export async function listHumanEscalations(pool: Pool, limit = 100) {
       caseId: asNumber(row.case_id),
       customerEmail: row.customer_email == null ? null : String(row.customer_email),
       amountAtRisk: asNumber(row.amount_at_risk),
+      expectedRecoveryValue: row.expected_recovery_value == null ? null : asNumber(row.expected_recovery_value),
       strategy: row.strategy == null ? null : String(row.strategy),
       recoveryStatus: String(row.recovery_status),
       reason: String(row.reason),

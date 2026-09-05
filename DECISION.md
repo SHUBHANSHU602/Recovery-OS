@@ -145,3 +145,37 @@
 - **Decision:** do not claim P1 runtime/E2E success from the GitHub connector session.
 - Static cross-file review and repository mutations are verified; local Postgres, Razorpay Test Mode, and Groq execution still need to be run in the user's environment.
 - The repository now exposes explicit commands for that verification so results can be recorded after execution rather than inferred.
+
+## Phase B — Recovery intelligence layer — 2026-09-04
+
+### Expected recovery value is operational priority, not recovered revenue
+- **Decision:** compute and persist a smoothed recovery probability plus `expected_recovery_value = amount_at_risk × probability` for prioritization.
+- Historical provider-confirmed outcomes may influence the probability, but expected value is never added to recovered revenue.
+- Rationale: merchants need to know which open cases deserve attention first without weakening the strict `payment_link.paid` accounting rule.
+
+### Initial retry timing should reflect the diagnosed failure class
+- **Decision:** the first durable `retry_with_backoff` schedule is root-cause aware; later transport/provider failures continue to use `Retry-After` or bounded execution backoff.
+- Rationale: a bank outage, insufficient funds, and an expired card should not all be treated as the same timing problem.
+
+### Quiet hours defer outreach instead of silently dropping it
+- **Decision:** outbound recovery contacts are checked against a deterministic merchant timezone/contact window. During quiet hours, the intended contact becomes durable scheduled work for the next allowed window.
+- Rationale: contact compliance belongs in deterministic execution policy, not in an LLM prompt or an in-memory timer.
+
+### Promise-to-Pay is a durable recovery commitment
+- **Decision:** customer payment promises are persisted with amount, due time, source, status, and an associated reminder job.
+- Only one pending promise is active per recovery case; a replacement cancels the previous pending promise.
+- A trusted recovery outcome fulfills the pending promise and cancels remaining scheduled work for that case.
+- Rationale: "I will pay later" is not a chat message to forget; it is a financial workflow state that must survive restarts and stop once payment is confirmed.
+
+### Conversational Promise-to-Pay requires an explicit customer commitment
+- **Decision:** the conversational agent may call `record_promise_to_pay` only when the customer explicitly commits to paying a specific amount by a specific future time; vague intent is not persisted as a financial commitment.
+- Trusted case identity and outstanding amount remain backend-owned, and the promise service caps the requested amount to the outstanding balance.
+- Rationale: an LLM may interpret language, but it must not manufacture a financial promise or redefine trusted monetary state.
+
+### Payment-link outcome correlation fails closed when a link is already known
+- **Decision:** `reference_id = recovery_case_<id>` is used only as a fallback correlation mechanism when the recovery case does not already have a stored Razorpay Payment Link ID. Once a link ID is persisted, a paid outcome must match that provider link.
+- Rationale: a valid case reference alone should not allow a different payment link to satisfy an already-bound recovery case.
+
+### Phase boundaries remain explicit
+- **Decision:** Phase B records/defer-schedules outbound contacts but does not pretend WhatsApp/SMS/email/voice are live provider integrations.
+- Real channel delivery belongs to Phase C and will use the same policy and scheduling boundaries.

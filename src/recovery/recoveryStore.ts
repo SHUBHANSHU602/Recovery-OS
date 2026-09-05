@@ -17,9 +17,6 @@ export type RecoveryStatus =
 
 export const TERMINAL_RECOVERY_STATES: RecoveryStatus[] = ["RECOVERED", "STOPPED", "ESCALATED"];
 
-// One schema-initialization promise is shared by every caller in this process.
-// The PostgreSQL advisory lock also protects against two application processes
-// attempting the same catalog DDL at startup.
 let schemaInitialization: Promise<void> | null = null;
 const TRACK3_SCHEMA_LOCK_ID = 370031;
 
@@ -42,9 +39,17 @@ async function initializeTrack3Schema(pool: Pool): Promise<void> {
         recovered_at TIMESTAMPTZ,
         evidence_cutoff_at TIMESTAMPTZ,
         terminal_reason TEXT,
+        recovery_probability DOUBLE PRECISION,
+        expected_recovery_value BIGINT,
+        priority_updated_at TIMESTAMPTZ,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
       );
+
+      ALTER TABLE recovery_cases
+        ADD COLUMN IF NOT EXISTS recovery_probability DOUBLE PRECISION,
+        ADD COLUMN IF NOT EXISTS expected_recovery_value BIGINT,
+        ADD COLUMN IF NOT EXISTS priority_updated_at TIMESTAMPTZ;
 
       CREATE TABLE IF NOT EXISTS recovery_jobs (
         case_id BIGINT PRIMARY KEY REFERENCES recovery_cases(id) ON DELETE CASCADE,
@@ -106,6 +111,24 @@ async function initializeTrack3Schema(pool: Pool): Promise<void> {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         resolved_at TIMESTAMPTZ
       );
+
+      CREATE TABLE IF NOT EXISTS payment_promises (
+        id BIGSERIAL PRIMARY KEY,
+        case_id BIGINT NOT NULL REFERENCES recovery_cases(id) ON DELETE CASCADE,
+        event_id TEXT NOT NULL REFERENCES events(event_id) ON DELETE CASCADE,
+        promised_amount BIGINT NOT NULL CHECK (promised_amount > 0),
+        due_at TIMESTAMPTZ NOT NULL,
+        status TEXT NOT NULL DEFAULT 'PENDING',
+        source TEXT NOT NULL DEFAULT 'merchant_or_agent',
+        note TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        fulfilled_at TIMESTAMPTZ,
+        cancelled_at TIMESTAMPTZ
+      );
+      CREATE INDEX IF NOT EXISTS payment_promises_case_idx ON payment_promises(case_id, status, due_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS payment_promises_one_pending_per_case_idx
+        ON payment_promises(case_id) WHERE status = 'PENDING';
 
       CREATE OR REPLACE FUNCTION prevent_audit_log_mutation()
       RETURNS trigger AS $$
@@ -205,11 +228,35 @@ export async function markRecoveryFromPaymentLink(
          terminal_reason = 'trusted_payment_link_paid',
          razorpay_payment_link_id = COALESCE(razorpay_payment_link_id, $1),
          updated_at = now()
-     WHERE (razorpay_payment_link_id = $1 OR ($3::bigint IS NOT NULL AND id = $3))
+     WHERE (
+         razorpay_payment_link_id = $1
+         OR (
+           razorpay_payment_link_id IS NULL
+           AND $3::bigint IS NOT NULL
+           AND id = $3
+         )
+       )
        AND status NOT IN ('RECOVERED', 'STOPPED', 'ESCALATED')
-     RETURNING id`,
+     RETURNING id, original_event_id`,
     [paymentLinkId, Math.max(0, paidAmount), referencedCaseId]
   );
+
+  if (result.rows.length === 1) {
+    const caseId = Number(result.rows[0].id);
+    await pool.query(
+      `UPDATE payment_promises
+       SET status = 'FULFILLED', fulfilled_at = COALESCE(fulfilled_at, now()), updated_at = now()
+       WHERE case_id = $1 AND status = 'PENDING'`,
+      [caseId]
+    );
+    await pool.query(
+      `UPDATE scheduled_actions
+       SET status = 'CANCELLED', updated_at = now()
+       WHERE case_id = $1 AND status = 'PENDING'`,
+      [caseId]
+    );
+  }
+
   return result.rows.length === 1;
 }
 
@@ -221,9 +268,25 @@ export async function markOriginalPaymentCaptured(pool: Pool, paymentId: string)
          updated_at = now()
      WHERE original_payment_id = $1
        AND status NOT IN ('RECOVERED', 'STOPPED', 'ESCALATED')
-     RETURNING original_event_id`,
+     RETURNING id, original_event_id`,
     [paymentId]
   );
+
+  for (const row of result.rows) {
+    await pool.query(
+      `UPDATE payment_promises
+       SET status = 'CANCELLED', cancelled_at = COALESCE(cancelled_at, now()), updated_at = now()
+       WHERE case_id = $1 AND status = 'PENDING'`,
+      [Number(row.id)]
+    );
+    await pool.query(
+      `UPDATE scheduled_actions
+       SET status = 'CANCELLED', updated_at = now()
+       WHERE case_id = $1 AND status = 'PENDING'`,
+      [Number(row.id)]
+    );
+  }
+
   return result.rows.map((row) => String(row.original_event_id));
 }
 

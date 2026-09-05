@@ -15,8 +15,11 @@ const pct = (value) => value == null ? "—" : `${Number(value).toFixed(1)}%`;
 const fmtDate = (value) => value ? new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "—";
 const esc = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
 
-async function api(path) {
-  const response = await fetch(path, { headers: { Accept: "application/json" } });
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    ...options,
+    headers: { Accept: "application/json", "Content-Type": "application/json", ...(options.headers || {}) },
+  });
   if (!response.ok) {
     let message = `Request failed (${response.status})`;
     try {
@@ -43,9 +46,11 @@ function statusBadge(status) {
 function renderMetricGrid(summary) {
   const cards = [
     ["Revenue at risk", money(summary.revenueAtRisk), `${summary.totalCases} durable recovery cases`],
+    ["Expected recoverable value", money(summary.expectedRecoveryValue), "Priority model over open cases"],
     ["Confirmed recovered", money(summary.confirmedRecovered), `${summary.recoveredCases} provider-confirmed case(s)`],
     ["Value recovery", pct(summary.valueRecoveryRate), "Only trusted paid outcomes count"],
     ["Diagnosis accuracy", pct(summary.diagnosisAccuracy), `${summary.diagnosisCorrect}/${summary.diagnosisTotal || 0} labeled cases`],
+    ["Promise to pay", summary.activePromises, "Active durable customer commitments"],
     ["Open cases", summary.openCases, `${summary.waitingCases} waiting · ${summary.scheduledCases} scheduled`],
     ["Human escalations", summary.escalatedCases, "Policy and ambiguity remain human-owned"],
   ];
@@ -104,6 +109,7 @@ function caseRows(cases) {
       <td>#${item.id}</td>
       <td><strong>${esc(item.customerEmail || "Unknown")}</strong><br><span class="muted">${esc(item.bank || "—")}</span></td>
       <td>${money(item.amountAtRisk)}</td>
+      <td>${money(item.expectedRecoveryValue || 0)}<br><span class="muted">${item.recoveryProbability == null ? "—" : pct(item.recoveryProbability * 100)}</span></td>
       <td>${esc(item.rootCause || "Awaiting diagnosis")}</td>
       <td>${esc(item.strategy || item.finalAction || "—")}</td>
       <td>${statusBadge(item.status)}</td>
@@ -126,7 +132,7 @@ function renderCaseTable(targetId, cases) {
   }
   target.innerHTML = `
     <table>
-      <thead><tr><th>Case</th><th>Customer</th><th>At risk</th><th>Diagnosis</th><th>Strategy</th><th>Status</th><th>Updated</th></tr></thead>
+      <thead><tr><th>Case</th><th>Customer</th><th>At risk</th><th>Expected value</th><th>Diagnosis</th><th>Strategy</th><th>Status</th><th>Updated</th></tr></thead>
       <tbody>${caseRows(cases)}</tbody>
     </table>
   `;
@@ -148,6 +154,7 @@ function renderEscalations(items) {
       <p>${esc(item.reason)}</p>
       <div class="queue-meta">
         <span>${money(item.amountAtRisk)} at risk</span>
+        <span>${money(item.expectedRecoveryValue || 0)} expected</span>
         <span>${esc(item.rootCause || "No diagnosis")}</span>
         <span>${fmtDate(item.updatedAt)}</span>
       </div>
@@ -157,6 +164,9 @@ function renderEscalations(items) {
 }
 
 function renderPolicy(policy) {
+  const quiet = policy.quietHours
+    ? `${String(policy.quietHours.startHour).padStart(2, "0")}:00–${String(policy.quietHours.endHour).padStart(2, "0")}:00 (${policy.quietHours.timeZone})`
+    : "Disabled";
   const entries = [
     ["Decision authority", policy.mode],
     ["Maximum automated retries", policy.maxAutomatedRetries],
@@ -164,7 +174,9 @@ function renderPolicy(policy) {
     ["Already recovered", policy.recoveredCaseBehavior],
     ["Customer opted out", policy.optedOutBehavior],
     ["Ambiguous execution", policy.ambiguousExecutionBehavior],
-    ["Quiet hours", policy.quietHours || "Phase B"],
+    ["Quiet hours", quiet],
+    ["Prioritization", policy.prioritization],
+    ["Promise-to-pay", policy.promiseToPay],
   ];
   document.getElementById("policy-cards").innerHTML = entries.map(([label, value]) => `
     <div class="policy-card"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>
@@ -184,15 +196,19 @@ async function openCase(caseId) {
   content.innerHTML = `<div class="empty">Loading trusted case history…</div>`;
 
   try {
-    const [item, timeline] = await Promise.all([
+    const [item, timeline, promises] = await Promise.all([
       api(`/api/dashboard/cases/${caseId}`),
       api(`/api/dashboard/cases/${caseId}/timeline`),
+      api(`/api/dashboard/cases/${caseId}/promises`),
     ]);
 
+    const activePromise = promises.items.find((promise) => promise.status === "PENDING");
     content.innerHTML = `
       <div class="detail-grid">
         ${detailCard("Status", statusBadge(item.status))}
         ${detailCard("Amount at risk", money(item.amountAtRisk))}
+        ${detailCard("Expected recovery value", money(item.expectedRecoveryValue || 0))}
+        ${detailCard("Recovery probability", item.recoveryProbability == null ? "—" : pct(item.recoveryProbability * 100))}
         ${detailCard("Confirmed recovered", money(item.recoveredAmount))}
         ${detailCard("Customer", esc(item.customerEmail || "—"))}
         ${detailCard("Root cause", esc(item.rootCause || "—"))}
@@ -211,6 +227,25 @@ async function openCase(caseId) {
         <p class="muted">${item.status === "RECOVERED" ? "This case has the persisted outcome evidence required by Recovery OS." : "Execution success alone does not increase recovered revenue."}</p>
       </section>
 
+      <section class="panel">
+        <div class="panel-header"><p class="eyebrow">Promise to pay</p><h3>${activePromise ? "Active commitment" : "Create customer commitment"}</h3></div>
+        ${activePromise ? `
+          <div class="detail-grid">
+            ${detailCard("Promised amount", money(activePromise.promisedAmount))}
+            ${detailCard("Due", fmtDate(activePromise.dueAt))}
+            ${detailCard("Source", esc(activePromise.source))}
+            ${detailCard("Status", statusBadge(activePromise.status))}
+          </div>
+        ` : item.status === "RECOVERED" || item.status === "STOPPED" || item.status === "ESCALATED" ? `<div class="empty">Terminal cases cannot accept a new promise.</div>` : `
+          <form id="promise-form" class="detail-grid">
+            <label class="detail-card"><span>Promised amount (₹)</span><input id="promise-amount" type="number" min="0.01" step="0.01" value="${(item.amountAtRisk / 100).toFixed(2)}" required></label>
+            <label class="detail-card"><span>Due at</span><input id="promise-due" type="datetime-local" required></label>
+            <label class="detail-card"><span>Note</span><input id="promise-note" type="text" placeholder="Customer said they will pay later"></label>
+            <button class="primary-button" type="submit">Save promise</button>
+          </form>
+        `}
+      </section>
+
       <div class="panel-header"><p class="eyebrow">Audit trail</p><h3>Case timeline</h3></div>
       <div class="timeline">
         ${timeline.events.length ? timeline.events.map((event) => `
@@ -222,6 +257,32 @@ async function openCase(caseId) {
         `).join("") : `<div class="empty">No audit events recorded.</div>`}
       </div>
     `;
+
+    const form = document.getElementById("promise-form");
+    if (form) {
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        try {
+          const amountRupees = Number(document.getElementById("promise-amount").value);
+          const due = document.getElementById("promise-due").value;
+          const note = document.getElementById("promise-note").value.trim();
+          await api(`/api/dashboard/cases/${caseId}/promises`, {
+            method: "POST",
+            body: JSON.stringify({
+              promisedAmount: Math.round(amountRupees * 100),
+              dueAt: new Date(due).toISOString(),
+              note,
+              source: "merchant_dashboard",
+            }),
+          });
+          toast("Promise-to-pay scheduled");
+          await openCase(caseId);
+          await refreshAll();
+        } catch (error) {
+          toast(error.message || "Unable to save promise");
+        }
+      });
+    }
   } catch (error) {
     content.innerHTML = `<div class="empty">${esc(error.message)}</div>`;
   }

@@ -46,7 +46,11 @@ export function createChannelRouter(pool: Pool) {
       res.status(201).json(result);
     } catch (error: any) {
       const message = String(error.message ?? error);
-      const status = /does not exist/.test(message) ? 404 : /terminal|cap reached|No /.test(message) ? 409 : 500;
+      const status = /does not exist/.test(message)
+        ? 404
+        : /terminal|cap reached|No |Quiet-hours policy/.test(message)
+          ? 409
+          : 500;
       if (status === 500) console.error("Channel send failed:", message);
       res.status(status).json({ error: message });
     }

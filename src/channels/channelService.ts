@@ -43,7 +43,7 @@ function formatRupees(paise: number): string {
 
 export function buildRecoveryMessage(input: { amountAtRisk: number; rootCause?: string | null; paymentLinkUrl?: string | null }): string {
   const amount = formatRupees(input.amountAtRisk);
-  const reason = input.rootCause ? ` We identified the issue as ${input.rootCause.replaceAll("_", " ")}.` : "";
+  const reason = input.rootCause ? ` We identified the issue as ${input.rootCause.split("_").join(" ")}.` : "";
   const link = input.paymentLinkUrl ? ` Complete payment securely: ${input.paymentLinkUrl}` : "";
   return `Recovery OS: Your ${amount} payment could not be completed.${reason}${link}`.trim();
 }
@@ -90,7 +90,7 @@ async function sendVoiceWithTwilio(to: string, message: string): Promise<{ id: s
   const authToken = env("TWILIO_AUTH_TOKEN");
   const from = env("TWILIO_VOICE_FROM");
   if (!accountSid || !authToken || !from) throw new Error("Twilio voice is not configured");
-  const safeMessage = message.replaceAll("&", "and").replaceAll("<", "").replaceAll(">", "");
+  const safeMessage = message.split("&").join("and").split("<").join("").split(">").join("");
   const form = new URLSearchParams();
   form.set("From", from);
   form.set("To", to);

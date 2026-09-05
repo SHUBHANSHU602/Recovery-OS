@@ -157,6 +157,7 @@ export function applyPlannerBusinessGuardrails(
   let primary: Action = modelPlan.primary_action;
   let fallback: Action = modelPlan.fallback_action;
   let guardrailReason: string | null = null;
+  const prior = priorAction(context);
 
   if (context.rootCause === "ambiguous" || context.confidence < 0.5) {
     primary = "escalate_to_human";
@@ -166,10 +167,16 @@ export function applyPlannerBusinessGuardrails(
     primary = "escalate_to_human";
     fallback = "escalate_to_human";
     guardrailReason = "The bounded automated-retry budget is exhausted, so recovery must move to human review.";
-  } else if (context.contactsLast24h >= 1 && context.trigger === "promise_due_unpaid") {
+  } else if (
+    context.contactsLast24h >= 1 &&
+    (
+      context.trigger === "promise_due_unpaid" ||
+      (context.trigger === "intervention_unresolved" && ["whatsapp_nudge", "offer_alternate_payment_method"].includes(prior ?? ""))
+    )
+  ) {
     primary = "escalate_to_human";
     fallback = "escalate_to_human";
-    guardrailReason = "The Promise-to-Pay is overdue but today's automated contact budget is already consumed.";
+    guardrailReason = "The current business outcome would require more customer recovery contact, but today's automated contact budget is already consumed.";
   } else if (context.trigger === "initial_failure") {
     if (context.rootCause === "systemic_bank_outage" && context.correlatedFailuresAtSameBank >= 2) {
       primary = "retry_with_backoff";
@@ -189,8 +196,6 @@ export function applyPlannerBusinessGuardrails(
     fallback = "escalate_to_human";
     guardrailReason = "A due unpaid promise is new customer evidence that supports one compliant reminder when contact capacity remains.";
   } else if (context.trigger === "intervention_unresolved") {
-    const prior = priorAction(context);
-
     if (
       context.rootCause === "expired_card" &&
       prior === "offer_alternate_payment_method" &&

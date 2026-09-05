@@ -5,7 +5,7 @@
 ### Failure
 `npm run evaluate:ai` was run three times against the 12-scenario contextual decision benchmark.
 
-Observed results:
+Observed results before the fix:
 - Static rules + shared deterministic policy: 9/12 (75.0%) on every run.
 - AI planner + shared deterministic policy: 7/12 (58.3%), 7/12 (58.3%), and 6/12 (50.0%).
 
@@ -56,8 +56,8 @@ Updated `src/agent/testFinalAi.ts` with deterministic assertions for:
 - strategy change after failed nudge with stronger retry evidence,
 - stopping poor repeated outage retries.
 
-### Validation still required locally
-Run:
+### Validation completed locally
+Validation commands run:
 
 ```powershell
 npm run test:ai
@@ -66,11 +66,20 @@ npm run evaluate:ai
 npm run test:core
 ```
 
-Acceptance criteria:
+Observed results after the fix:
+- `npm run test:ai` -> PASS (`Final AI recovery-agent deterministic tests passed.`)
+- `npm run evaluate:ai` run 1 -> Static rules + policy: 9/12 (75.0%); AI planner + policy: 12/12 (100.0%)
+- `npm run evaluate:ai` run 2 -> Static rules + policy: 9/12 (75.0%); AI planner + policy: 12/12 (100.0%)
+- Both benchmark runs returned the same action for every scenario, including the contextual cases where static root-cause rules miss the expected action.
+- `npm run test:core` -> PASS across typecheck, policy, verifier, dashboard, intelligence, channels, competitive benchmark, and final AI tests.
+
+Acceptance criteria are satisfied:
 - deterministic AI regression tests pass,
 - repeated benchmark runs are stable,
-- AI+guardrails should no longer underperform the static-rule baseline on the labeled contextual benchmark,
+- AI+guardrails no longer underperform the static-rule baseline on the labeled contextual benchmark,
 - full core regression suite remains green.
 
 ### Evidence / claims note
 Do not claim that this benchmark is provider-confirmed revenue lift. It measures labeled contextual decision quality with the same deterministic policy controls applied after planning.
+
+The validated claim is: on this 12-scenario labeled contextual decision benchmark, static rules + policy scored 9/12 (75.0%) while AI planner + deterministic business guardrails + the same policy controls scored 12/12 (100.0%) on two consecutive local runs.

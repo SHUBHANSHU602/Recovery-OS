@@ -7,7 +7,7 @@ ALTER TABLE recovery_cases
 UPDATE recovery_cases
 SET financial_status = CASE
       WHEN status = 'RECOVERED' THEN 'RECOVERED'
-      WHEN status = 'STOPPED' THEN 'STOPPED'
+      WHEN terminal_reason = 'original_payment_captured' THEN 'STOPPED'
       ELSE 'OPEN'
     END,
     automation_status = CASE

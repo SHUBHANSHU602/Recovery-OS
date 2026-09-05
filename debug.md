@@ -106,9 +106,32 @@ This preserves the production invariant and makes the E2E test deterministic wit
 ### Separate test-harness correction
 The first E2E attempt also queried a non-existent `audit_log.payload` column after the product had already reached `RECOVERED`. The audit table stores JSON under `detail`, so the local verification script must query `detail`.
 
-### Validation required
-Rerun the final E2E test after both fixture corrections:
-- unique synthetic bank per run,
-- `audit_log.detail` instead of `audit_log.payload`.
+### Final validation completed locally
+After applying both fixture corrections (unique bank per run + `audit_log.detail`), `npx tsx .\final-e2e-test.ts` completed successfully for case `217`, event `final_e2e_failure_1788609374`.
 
-Expected result: the isolated insufficient-funds case should pass diagnosis/verifier, execute the bounded recovery action, accept the trusted signed `payment_link.paid` outcome, transition to `RECOVERED`, cancel pending work, and complete dashboard/audit/webhook assertions.
+Observed proof:
+- signed `payment.failed` webhook -> HTTP 200,
+- durable recovery case/job -> created and processed,
+- AI diagnosis -> `insufficient_funds`, confidence `0.95`,
+- deterministic verifier -> `PASSED`,
+- AI recovery plan -> `whatsapp_nudge` primary, `retry_with_backoff` fallback,
+- deterministic policy -> `APPROVED`, final action `whatsapp_nudge`,
+- outbound contact -> accepted,
+- conversational recovery state -> conversation persisted with 2 messages,
+- signed `payment_link.paid` webhook -> HTTP 200,
+- final case -> `RECOVERED`,
+- amount at risk -> 36000 paise,
+- recovered amount -> 36000 paise,
+- terminal reason -> `trusted_payment_link_paid`,
+- Razorpay payment-link id persisted -> `plink_final_e2e_1788609374`,
+- pending scheduled work -> none,
+- expected audit chain present through `execution_conversation_started`,
+- paid-outcome audit -> `recovery_outcome_webhook`,
+- both webhook deliveries -> `PROCESSED`, attempt count 1, no last error,
+- dashboard case endpoint -> HTTP 200 and status `RECOVERED`,
+- script terminal result -> `FINAL E2E RESULT: PASS`.
+
+### Final E2E claim boundary
+This final integration run used locally generated, correctly HMAC-signed Razorpay-style webhooks and the recovery-case `reference_id` linkage. It proves the cryptographic validation path, durable closed-loop orchestration, trusted outcome handling, state/accounting transitions, audit trail, cancellation, and dashboard integration.
+
+It should not be described as proof that Razorpay externally delivered a fresh webhook or that a fresh live Test Mode Payment Link was created during this exact run; provider-side Test Mode link quota had already been exhausted and that provider path was validated separately through the earlier real API/429/idempotency tests.

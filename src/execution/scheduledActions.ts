@@ -4,6 +4,7 @@ import { recordOutboundContact, requestPaymentLink } from "./actionService";
 import { createHumanEscalation, ensureTrack3Schema, isRecoveryTerminal, setRecoveryState } from "../recovery/recoveryStore";
 import { logAuditEvent } from "../ledger/auditLog";
 import { causeAwareInitialDelaySeconds } from "../intelligence/recoveryIntelligence";
+import { queueRecoveryReplan, scheduleBusinessOutcomeReview } from "../recovery/replanQueue";
 
 const pool = new Pool();
 const STALE_CLAIM_MINUTES = 5;
@@ -94,6 +95,15 @@ async function processScheduledContact(job: any): Promise<void> {
     deferDuringQuietHours: true,
   });
 
+  if (result.status === "executed") {
+    await scheduleBusinessOutcomeReview(pool, {
+      caseId: Number(job.case_id),
+      eventId: String(job.event_id),
+      interventionId: job.intervention_id == null ? null : Number(job.intervention_id),
+      action: desiredAction,
+    });
+  }
+
   await pool.query(
     "UPDATE scheduled_actions SET status = $2, last_error = $3, updated_at = now() WHERE id = $1",
     [job.id, result.status === "blocked" ? "CANCELLED" : "DONE", result.reason ?? null]
@@ -116,21 +126,78 @@ async function processPromiseReminder(job: any): Promise<void> {
   }
 
   const promise = promiseResult.rows[0];
-  const message = `Reminder: your promised payment of ₹${(Number(promise.promised_amount) / 100).toFixed(2)} is due. You can complete it securely when ready.`;
-  const result = await recordOutboundContact(String(job.event_id), "whatsapp_nudge", message, {
-    executionKey: `${job.schedule_key}_contact`,
-    purpose: "promise_to_pay_reminder",
-    deferDuringQuietHours: true,
+  const queued = await queueRecoveryReplan(pool, {
+    caseId: Number(job.case_id),
+    eventId: String(job.event_id),
+    trigger: "promise_due_unpaid",
+    observation: {
+      promiseId: Number(promise.id),
+      promisedAmount: Number(promise.promised_amount),
+      dueAt: promise.due_at,
+      outcome: "promise_due_and_case_still_unresolved",
+    },
   });
-
   await pool.query(
-    "UPDATE scheduled_actions SET status = $2, last_error = $3, updated_at = now() WHERE id = $1",
-    [job.id, result.status === "blocked" ? "CANCELLED" : "DONE", result.reason ?? null]
+    "UPDATE scheduled_actions SET status = 'DONE', last_error = $2, updated_at = now() WHERE id = $1",
+    [job.id, queued ? null : "Replan not queued because case is terminal or unavailable"]
   );
-  await logAuditEvent(String(job.event_id), "promise_to_pay_reminder_processed", {
+  await logAuditEvent(String(job.event_id), "promise_due_replan_queued", {
     promiseId: Number(promise.id),
     scheduleKey: job.schedule_key,
-    result,
+    queued,
+  });
+}
+
+async function processOutcomeReview(job: any): Promise<void> {
+  const eventId = String(job.event_id);
+  const scheduledInterventionId = job.intervention_id == null ? null : Number(job.intervention_id);
+
+  if (scheduledInterventionId != null) {
+    const latest = await pool.query(
+      `SELECT i.id
+       FROM interventions i
+       JOIN diagnoses d ON d.id = i.diagnosis_id
+       WHERE d.event_id = $1
+       ORDER BY i.id DESC
+       LIMIT 1`,
+      [eventId]
+    );
+    const latestInterventionId = latest.rows[0]?.id == null ? null : Number(latest.rows[0].id);
+    if (latestInterventionId != null && latestInterventionId > scheduledInterventionId) {
+      await pool.query(
+        "UPDATE scheduled_actions SET status = 'CANCELLED', last_error = $2, updated_at = now() WHERE id = $1",
+        [job.id, `Stale review: newer intervention ${latestInterventionId} superseded ${scheduledInterventionId}`]
+      );
+      await logAuditEvent(eventId, "business_outcome_review_stale", {
+        scheduleKey: job.schedule_key,
+        scheduledInterventionId,
+        latestInterventionId,
+      });
+      return;
+    }
+  }
+
+  const priorAction = String(job.last_error ?? "prior_action=unknown").replace(/^prior_action=/, "");
+  const queued = await queueRecoveryReplan(pool, {
+    caseId: Number(job.case_id),
+    eventId,
+    trigger: "intervention_unresolved",
+    observation: {
+      priorAction,
+      reviewKey: String(job.schedule_key),
+      interventionId: scheduledInterventionId,
+      outcome: "case_still_unresolved_at_business_review",
+    },
+  });
+  await pool.query(
+    "UPDATE scheduled_actions SET status = 'DONE', last_error = $2, updated_at = now() WHERE id = $1",
+    [job.id, queued ? null : "Replan not queued because case is terminal or unavailable"]
+  );
+  await logAuditEvent(eventId, "business_outcome_review_processed", {
+    priorAction,
+    scheduleKey: job.schedule_key,
+    scheduledInterventionId,
+    queued,
   });
 }
 
@@ -153,7 +220,7 @@ export async function processDueScheduledActions(limit = 10): Promise<void> {
        WHERE id = $1
          AND ((status = 'PENDING' AND run_at <= now())
            OR (status = 'RUNNING' AND claimed_at < now() - ($2 * interval '1 minute')))
-       RETURNING id, case_id, event_id, intervention_id, desired_action, schedule_key, attempt_count`,
+       RETURNING id, case_id, event_id, intervention_id, desired_action, schedule_key, attempt_count, last_error`,
       [row.id, STALE_CLAIM_MINUTES]
     );
     if (claim.rows.length === 0) continue;
@@ -164,6 +231,10 @@ export async function processDueScheduledActions(limit = 10): Promise<void> {
       continue;
     }
 
+    if (String(job.desired_action) === "ai_outcome_review") {
+      await processOutcomeReview(job);
+      continue;
+    }
     if (String(job.desired_action).startsWith("contact:")) {
       await processScheduledContact(job);
       continue;
@@ -188,6 +259,14 @@ export async function processDueScheduledActions(limit = 10): Promise<void> {
     );
 
     if (result.status === "executed" || result.status === "blocked") {
+      if (result.status === "executed") {
+        await scheduleBusinessOutcomeReview(pool, {
+          caseId: Number(job.case_id),
+          eventId: String(job.event_id),
+          interventionId: job.intervention_id == null ? null : Number(job.intervention_id),
+          action: "retry_with_backoff",
+        });
+      }
       await pool.query(
         "UPDATE scheduled_actions SET status = $2, last_error = NULL, updated_at = now() WHERE id = $1",
         [job.id, result.status === "blocked" ? "CANCELLED" : "DONE"]

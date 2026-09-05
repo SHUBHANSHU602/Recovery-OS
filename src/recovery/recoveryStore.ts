@@ -57,8 +57,15 @@ async function initializeTrack3Schema(pool: Pool): Promise<void> {
         attempt_count INTEGER NOT NULL DEFAULT 0,
         claimed_at TIMESTAMPTZ,
         last_error TEXT,
+        mode TEXT NOT NULL DEFAULT 'INITIAL',
+        replan_trigger TEXT,
+        replan_observation JSONB,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
       );
+      ALTER TABLE recovery_jobs
+        ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'INITIAL',
+        ADD COLUMN IF NOT EXISTS replan_trigger TEXT,
+        ADD COLUMN IF NOT EXISTS replan_observation JSONB;
 
       CREATE TABLE IF NOT EXISTS outbound_contacts (
         id BIGSERIAL PRIMARY KEY,
@@ -130,6 +137,27 @@ async function initializeTrack3Schema(pool: Pool): Promise<void> {
       CREATE UNIQUE INDEX IF NOT EXISTS payment_promises_one_pending_per_case_idx
         ON payment_promises(case_id) WHERE status = 'PENDING';
 
+      CREATE TABLE IF NOT EXISTS recovery_plans (
+        id BIGSERIAL PRIMARY KEY,
+        case_id BIGINT NOT NULL REFERENCES recovery_cases(id) ON DELETE CASCADE,
+        event_id TEXT NOT NULL REFERENCES events(event_id) ON DELETE CASCADE,
+        version INTEGER NOT NULL CHECK (version > 0),
+        trigger TEXT NOT NULL,
+        objective TEXT NOT NULL,
+        primary_action TEXT NOT NULL,
+        fallback_action TEXT NOT NULL,
+        reasoning TEXT NOT NULL,
+        escalation_criteria JSONB NOT NULL DEFAULT '[]'::jsonb,
+        stop_conditions JSONB NOT NULL DEFAULT '[]'::jsonb,
+        strategy_evidence JSONB NOT NULL DEFAULT '[]'::jsonb,
+        observation JSONB,
+        policy_result TEXT NOT NULL,
+        policy_final_action TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (case_id, version)
+      );
+      CREATE INDEX IF NOT EXISTS recovery_plans_case_idx ON recovery_plans(case_id, version DESC);
+
       CREATE OR REPLACE FUNCTION prevent_audit_log_mutation()
       RETURNS trigger AS $$
       BEGIN
@@ -184,8 +212,8 @@ export async function ensureRecoveryCase(pool: Pool, eventId: string): Promise<n
   );
 
   await pool.query(
-    `INSERT INTO recovery_jobs (case_id, status)
-     VALUES ($1, 'PENDING')
+    `INSERT INTO recovery_jobs (case_id, status, mode)
+     VALUES ($1, 'PENDING', 'INITIAL')
      ON CONFLICT (case_id) DO NOTHING`,
     [result.rows[0].id]
   );

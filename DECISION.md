@@ -224,3 +224,43 @@
 - **Decision:** Phase C obtains a per-customer PostgreSQL advisory transaction lock, checks the 24-hour contact count, and inserts a `pending` outbound-contact reservation before calling an external communication provider.
 - Provider success converts the reservation to the final delivery state; provider failure releases the pending reservation.
 - Rationale: a check-then-send flow allowed concurrent requests to both observe room under the cap and contact the same customer twice.
+
+## Final AI recovery-agent phase — 2026-09-05
+
+### AI plans recovery; deterministic systems still own trust and authorization
+- **Decision:** replace the automated pipeline's one-shot action recommendation with a structured, versioned recovery plan containing an objective, one primary action, one fallback action, reasoning, escalation criteria, and stop conditions.
+- Only actions from the existing bounded menu are allowed. The deterministic verifier and policy gate still run outside the model; only the policy-approved primary action executes in that planning cycle. The fallback is stored as auditable planning context, not a hidden second side effect.
+- Rationale: this makes AI responsible for the ambiguous recovery strategy problem without giving it authority over webhook trust, policy limits, idempotency, payment amounts, or recovered-money accounting.
+
+### Replanning is driven by business outcomes, not infrastructure failures
+- **Decision:** successful interventions create a durable `ai_outcome_review`; if the case remains unresolved at review time, the existing recovery worker re-enters the planner in `REPLAN` mode with the previous plan and new business observation. A due-but-unpaid Promise-to-Pay also enters the same replanning path.
+- HTTP 429, 5xx, `Retry-After`, network errors, worker crashes, and database failures remain in deterministic retry/error handling and are explicitly excluded from AI business reasoning.
+- Rationale: an LLM can reason about changing customer/payment intent, but transport reliability is better handled by bounded deterministic systems.
+
+### Outcome reviews are tied to the intervention they were created for
+- **Decision:** an `ai_outcome_review` carrying an older intervention ID is cancelled if a newer intervention already exists when the review fires.
+- Rationale: an old timer should not trigger another plan after a newer customer/recovery decision has already superseded the action it was meant to evaluate.
+
+### Immediate retry idempotency advances with the logical attempt
+- **Decision:** `retry_now` no longer always uses `attempt_1`; the current DB-backed automated retry count determines the next logical attempt number, while the policy cap remains authoritative.
+- Rationale: one-shot execution never exposed this issue, but replanning can legitimately choose another immediate retry. Reusing `attempt_1` would incorrectly classify that later authorized attempt as a duplicate.
+
+### Recovery memory is outcome-informed, not model retraining
+- **Decision:** the planner receives SQL-aggregated terminal outcomes for comparable root causes plus prior customer recovery outcomes. Provider-confirmed `trusted_payment_link_paid` remains the recovery definition.
+- This is described as **outcome-informed decision making**, not continuous learning or online model training.
+- Rationale: history can improve contextual strategy selection without overstating that the model weights are being retrained.
+
+### Customer conversation uses the same live recovery context
+- **Decision:** refresh the conversational agent's system context on every inbound turn with the latest verified diagnosis, recovery plan, retry/contact state, and active Promise-to-Pay instead of permanently reusing the first system prompt.
+- Existing tools remain policy-gated: payment link, Promise-to-Pay, risk check, and human escalation. Trusted identity and amount remain backend-owned.
+- Rationale: customer language is a business observation in the same recovery loop; a generic chatbot with stale context would be disconnected from the automated recovery plan.
+
+### AI-vs-rules evaluation must be policy-fair
+- **Decision:** the contextual decision benchmark compares **static rules + the same deterministic policy gate** against **AI planner + the same deterministic policy gate**. It scores final allowed actions on labeled context-dependent scenarios.
+- Scenarios intentionally include cases where policy alone fixes both arms equally and cases where history/previous-plan context must change the strategy while policy would still permit the static rule.
+- Rationale: giving the AI credit for retry/contact limits already enforced by deterministic code would be a misleading benchmark.
+
+### AI decision quality and revenue evidence remain separate
+- **Decision:** `npm run evaluate:ai` is explicitly a labeled contextual decision benchmark, not a recovered-revenue or causal business-lift claim. Its output must never be added to provider-confirmed recovery metrics.
+- Real Groq benchmark results should only be quoted after local execution with the actual model. Real recovered revenue remains sourced only from trusted Razorpay outcomes.
+- Rationale: the project should be able to answer “why AI?” with measurable decision behavior without fabricating a revenue-lift claim.

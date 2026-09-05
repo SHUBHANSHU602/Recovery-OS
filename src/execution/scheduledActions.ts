@@ -149,14 +149,43 @@ async function processPromiseReminder(job: any): Promise<void> {
 }
 
 async function processOutcomeReview(job: any): Promise<void> {
+  const eventId = String(job.event_id);
+  const scheduledInterventionId = job.intervention_id == null ? null : Number(job.intervention_id);
+
+  if (scheduledInterventionId != null) {
+    const latest = await pool.query(
+      `SELECT i.id
+       FROM interventions i
+       JOIN diagnoses d ON d.id = i.diagnosis_id
+       WHERE d.event_id = $1
+       ORDER BY i.id DESC
+       LIMIT 1`,
+      [eventId]
+    );
+    const latestInterventionId = latest.rows[0]?.id == null ? null : Number(latest.rows[0].id);
+    if (latestInterventionId != null && latestInterventionId > scheduledInterventionId) {
+      await pool.query(
+        "UPDATE scheduled_actions SET status = 'CANCELLED', last_error = $2, updated_at = now() WHERE id = $1",
+        [job.id, `Stale review: newer intervention ${latestInterventionId} superseded ${scheduledInterventionId}`]
+      );
+      await logAuditEvent(eventId, "business_outcome_review_stale", {
+        scheduleKey: job.schedule_key,
+        scheduledInterventionId,
+        latestInterventionId,
+      });
+      return;
+    }
+  }
+
   const priorAction = String(job.last_error ?? "prior_action=unknown").replace(/^prior_action=/, "");
   const queued = await queueRecoveryReplan(pool, {
     caseId: Number(job.case_id),
-    eventId: String(job.event_id),
+    eventId,
     trigger: "intervention_unresolved",
     observation: {
       priorAction,
       reviewKey: String(job.schedule_key),
+      interventionId: scheduledInterventionId,
       outcome: "case_still_unresolved_at_business_review",
     },
   });
@@ -164,9 +193,10 @@ async function processOutcomeReview(job: any): Promise<void> {
     "UPDATE scheduled_actions SET status = 'DONE', last_error = $2, updated_at = now() WHERE id = $1",
     [job.id, queued ? null : "Replan not queued because case is terminal or unavailable"]
   );
-  await logAuditEvent(String(job.event_id), "business_outcome_review_processed", {
+  await logAuditEvent(eventId, "business_outcome_review_processed", {
     priorAction,
     scheduleKey: job.schedule_key,
+    scheduledInterventionId,
     queued,
   });
 }

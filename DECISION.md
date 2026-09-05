@@ -179,3 +179,18 @@
 ### Phase boundaries remain explicit
 - **Decision:** Phase B records/defer-schedules outbound contacts but does not pretend WhatsApp/SMS/email/voice are live provider integrations.
 - Real channel delivery belongs to Phase C and will use the same policy and scheduling boundaries.
+
+## Phase C — Omnichannel recovery — 2026-09-05
+
+### Channels share one recovery boundary
+- **Decision:** email, SMS, WhatsApp and voice use one channel service instead of separate feature-specific side-effect paths.
+- Every send reloads trusted recovery-case/customer data, checks terminal state and the deterministic 24-hour contact cap, then records a durable delivery row before provider execution.
+- Rationale: adding more channels must not create four new ways to bypass recovery policy.
+
+### Provider availability is explicit, never implied
+- **Decision:** email uses Resend when configured; SMS, WhatsApp and voice use Twilio when configured. Missing credentials produce an explicitly `SIMULATED` delivery rather than pretending a provider send occurred.
+- Rationale: demo breadth is useful only if provider claims remain honest and machine-visible.
+
+### Channel delivery is not revenue recovery
+- **Decision:** `channel_deliveries` records communication attempts only. No accepted message, SMS, WhatsApp send, email, or voice call changes `recovery_cases.recovered_amount` or `RECOVERED` state.
+- Rationale: the existing trusted Razorpay paid-outcome contract remains the only source of recovered revenue.

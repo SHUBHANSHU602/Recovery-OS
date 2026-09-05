@@ -179,3 +179,17 @@
 ### Phase boundaries remain explicit
 - **Decision:** Phase B records/defer-schedules outbound contacts but does not pretend WhatsApp/SMS/email/voice are live provider integrations.
 - Real channel delivery belongs to Phase C and will use the same policy and scheduling boundaries.
+
+## Phase D — Competitive evaluation — 2026-09-05
+
+### Offline benchmark and provider-confirmed revenue are separate evidence classes
+- **Decision:** the 500-case treatment/control benchmark is explicitly synthetic and counterfactual. Its simulated outcomes never write to `recovery_cases` and never contribute to provider-confirmed recovered revenue.
+- Rationale: a larger benchmark improves experimental comparability without weakening the strict Razorpay paid-outcome accounting rule.
+
+### Reproducibility beats random headline generation
+- **Decision:** benchmark scenarios use a fixed seeded PRNG, deterministic cause distribution, deterministic amount generation, and randomized treatment/control assignment from the same seed.
+- Rationale: the exact 500-case dataset and result can be reproduced from source; changing the seed or assumptions is an explicit methodology change.
+
+### Recovery probabilities are assumptions, not empirical claims
+- **Decision:** cause-specific control/treatment probabilities are declared in source and documentation as benchmark assumptions.
+- Rationale: simulated lift is useful for testing evaluation mechanics, but it must not be described as observed merchant performance or real recovered money.

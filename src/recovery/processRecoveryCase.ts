@@ -181,6 +181,7 @@ export async function processRecoveryCase(eventId: string): Promise<void> {
       finalAction: intervention.final_action,
       amount: Number(payment.amount),
       customerEmail,
+      automatedRetryCount: policyContext.automatedRetryCount,
     });
 
     await pool.query(

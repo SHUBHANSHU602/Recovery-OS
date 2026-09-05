@@ -20,7 +20,8 @@
     "test:benchmark": "tsx src/evaluation/testCompetitiveBenchmark.ts",
     "test:ai": "tsx src/agent/testFinalAi.ts",
     "test:payment-integrity": "tsx src/recovery/testPaymentIntegrity.ts",
-    "test:core": "npm run typecheck && npm run test:policy && npm run test:verifier && npm run test:dashboard && npm run test:intelligence && npm run test:channels && npm run test:benchmark && npm run test:ai && npm run test:payment-integrity"
+    "test:payment-link-provider": "tsx src/execution/testPaymentLinkProvider.ts",
+    "test:core": "npm run typecheck && npm run test:policy && npm run test:verifier && npm run test:dashboard && npm run test:intelligence && npm run test:channels && npm run test:benchmark && npm run test:ai && npm run test:payment-integrity && npm run test:payment-link-provider"
   },
   "engines": {
     "node": ">=20"

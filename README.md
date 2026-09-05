@@ -44,11 +44,7 @@ Mismatches: 0
 PROVIDER RECONCILIATION RESULT: PASS
 ```
 
-> **Screenshot placeholder — add the Razorpay provider reconciliation PASS screenshot here before submission.**
->
-> Suggested file path: `docs/provider-reconciliation-pass.png`
-
-<!-- PROVIDER_RECONCILIATION_SCREENSHOT_PLACEHOLDER -->
+<img width="620" height="350" alt="image" src="https://github.com/user-attachments/assets/d4102026-cb69-4bf8-b341-f2fbe3439e93" />
 
 This is a **controlled Test Mode integration validation**, not a production recovery-rate claim. The correct statement is that **4/4 intentionally paid test links were reconciled correctly**, while the unpaid control was not counted as recovered revenue.
 

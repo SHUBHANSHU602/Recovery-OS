@@ -3,122 +3,67 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Recovery OS — Live Merchant Console</title>
-  <link rel="stylesheet" href="/dashboard.css" />
-  <link rel="stylesheet" href="/live-console.css" />
+  <meta name="description" content="Recovery OS — closed-loop AI revenue recovery for failed payments." />
+  <title>Recovery OS — AI Revenue Recovery</title>
+  <link rel="stylesheet" href="/ui.css" />
 </head>
-<body>
-  <div class="app-shell">
-    <aside class="sidebar">
-      <div class="brand">
-        <div class="brand-mark">R</div>
-        <div><strong>Recovery OS</strong><span>Live Merchant Console</span></div>
+<body class="landing-page">
+  <header class="site-nav">
+    <a class="brand" href="/"><span class="brand-mark">R</span><span>Recovery OS</span></a>
+    <nav><a href="#how">How it works</a><a href="#proof">Proof</a><a class="nav-cta" href="/app.html">Open Recovery Console</a></nav>
+  </header>
+
+  <main>
+    <section class="hero landing-shell">
+      <div class="hero-copy">
+        <span class="kicker">Closed-loop AI revenue recovery</span>
+        <h1>Turn failed payments into <span>recoverable revenue.</span></h1>
+        <p>Recovery OS detects payment failures, reasons about the best next action, executes through deterministic safety controls, follows up with the customer, and records money only after a trusted paid outcome.</p>
+        <div class="hero-actions"><a class="button primary" href="/app.html">Watch Recovery Live</a><a class="button ghost" href="#how">See the architecture</a></div>
+        <div class="trust-line"><span>✓ HMAC-verified webhooks</span><span>✓ Policy-gated AI</span><span>✓ Idempotent actions</span><span>✓ Trusted recovery accounting</span></div>
       </div>
-      <nav class="nav" aria-label="Primary navigation">
-        <button class="nav-item active" data-view="overview">Overview</button>
-        <button class="nav-item" data-view="cases">Recovery Cases</button>
-        <button class="nav-item" data-view="activity">Live Activity</button>
-        <button class="nav-item" data-view="escalations">Human Queue</button>
-        <button class="nav-item" data-view="policy">Policy Center</button>
-        <a class="nav-item" href="/channels.html">Recovery Channels</a>
-      </nav>
-      <div class="sidebar-footer">
-        <div class="trust-chip">Provider-confirmed outcomes only</div>
-        <small>AI reasons. Policy decides. Side effects stay bounded.</small>
+      <div class="hero-proof-card">
+        <div class="proof-head"><span class="pulse"></span><span>Backend-connected recovery proof</span></div>
+        <div class="money" id="landing-recovered">₹—</div>
+        <p>Trusted paid outcomes recorded by the recovery ledger.</p>
+        <div class="proof-row"><span>Recovered cases</span><strong id="landing-recovered-cases">—</strong></div>
+        <div class="proof-row"><span>Diagnosis accuracy</span><strong id="landing-accuracy">—</strong></div>
+        <div class="proof-row"><span>System</span><strong id="landing-health">Connecting…</strong></div>
+        <small>Validated Razorpay Test Mode recovery: <b>₹703.51</b></small>
       </div>
-    </aside>
+    </section>
 
-    <main class="main">
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">Track 3 · AI Revenue Recovery</p>
-          <h1 id="page-title">Revenue Recovery Command Center</h1>
-          <p id="last-sync" class="muted compact">Waiting for first live sync…</p>
-        </div>
-        <div class="topbar-actions">
-          <div id="live-indicator" class="live-indicator"><span></span><b>Connecting</b></div>
-          <label class="auto-toggle"><input id="auto-refresh" type="checkbox" checked /> Auto 3s</label>
-          <button id="refresh-button" class="button secondary">Refresh now</button>
-        </div>
-      </header>
+    <section class="logo-strip landing-shell"><span>Razorpay</span><span>PostgreSQL</span><span>Groq</span><span>Twilio</span><span>Resend</span></section>
 
-      <section id="overview-view" class="view active">
-        <div class="hero-card">
-          <div>
-            <p class="eyebrow">Closed-loop recovery</p>
-            <h2>Watch the recovery loop move in real time.</h2>
-            <p>New webhook events, AI plans, policy decisions, schedules, contacts, conversations and outcomes automatically appear here.</p>
-          </div>
-          <div class="hero-proof">
-            <span class="proof-label">Trusted recovery rule</span>
-            <strong>payment_link.paid → RECOVERED</strong>
-            <small id="console-mode" class="muted">Checking local test console…</small>
-          </div>
-        </div>
+    <section id="how" class="section landing-shell">
+      <div class="section-heading"><span class="kicker">How it works</span><h2>AI where judgment matters. Deterministic code where money matters.</h2></div>
+      <div class="flow-grid">
+        <article><b>01</b><h3>Detect & trust</h3><p>Authenticate the Razorpay webhook and create a durable recovery case.</p></article>
+        <article><b>02</b><h3>Diagnose</h3><p>Build causal evidence and let the model diagnose the failure; a verifier checks the claim.</p></article>
+        <article><b>03</b><h3>Plan & act</h3><p>Create a contextual recovery plan, apply policy, then execute or schedule safely.</p></article>
+        <article><b>04</b><h3>Recover & prove</h3><p>Replan when needed and count revenue only when the trusted paid outcome arrives.</p></article>
+      </div>
+    </section>
 
-        <div id="metric-grid" class="metric-grid"></div>
+    <section class="section landing-shell split-section">
+      <div><span class="kicker">Built for real recovery state</span><h2>More than a retry button.</h2><p>Recovery OS combines versioned AI plans, durable backoff, Promise-to-Pay, customer conversations, human escalation, quiet-hour and contact-cap policy, omnichannel outreach, and an append-only audit trail in one workflow.</p></div>
+      <div class="architecture-mini"><div>payment.failed</div><i>↓</i><div>Evidence → AI → Verifier</div><i>↓</i><div>Plan → Policy → ActionService</div><i>↓</i><div>Conversation / Retry / Promise</div><i>↓</i><div class="success-box">payment_link.paid → RECOVERED</div></div>
+    </section>
 
-        <div class="grid two-col">
-          <section class="panel"><div class="panel-header"><p class="eyebrow">Portfolio</p><h3>Recovery states</h3></div><div id="status-chart" class="bar-list"></div></section>
-          <section class="panel"><div class="panel-header"><p class="eyebrow">Intelligence</p><h3>Failure causes</h3></div><div id="cause-chart" class="bar-list"></div></section>
-        </div>
+    <section id="proof" class="section landing-shell">
+      <div class="section-heading"><span class="kicker">Validated engineering proof</span><h2>Measured behavior, not a mock dashboard.</h2></div>
+      <div class="proof-stats">
+        <div><strong>₹703.51</strong><span>Razorpay Test Mode paid recovery validated</span></div>
+        <div><strong>24/25</strong><span>diagnoses correct on batch_1</span></div>
+        <div><strong>12/12</strong><span>contextual AI decisions, repeated twice</span></div>
+        <div><strong>PASS</strong><span>closed-loop signed E2E validation</span></div>
+      </div>
+    </section>
 
-        <section class="panel">
-          <div class="panel-header split"><div><p class="eyebrow">Latest activity</p><h3>What Recovery OS is doing now</h3></div><button class="text-button" data-open-view="activity">Open full stream</button></div>
-          <div id="activity-preview" class="activity-list"></div>
-        </section>
+    <section class="cta landing-shell"><div><span class="kicker">Live product demo</span><h2>See the recovery state change as the backend works.</h2></div><a class="button primary" href="/app.html">Open Recovery Console →</a></section>
+  </main>
 
-        <section class="panel">
-          <div class="panel-header split"><div><p class="eyebrow">Recent cases</p><h3>Live recovery portfolio</h3></div><button class="text-button" data-open-view="cases">View all cases</button></div>
-          <div id="recent-cases" class="table-wrap"></div>
-        </section>
-      </section>
-
-      <section id="cases-view" class="view">
-        <section class="panel">
-          <div class="panel-header split responsive-stack">
-            <div><p class="eyebrow">Operations</p><h3>Recovery Cases</h3><p class="muted">Click any case for plan history, runtime state, conversation, PTP and guarded test controls.</p></div>
-            <div class="filters">
-              <input id="case-search" class="input" type="search" placeholder="Search customer, event or payment" />
-              <select id="case-status" class="input">
-                <option value="">All statuses</option><option>DETECTED</option><option>EVIDENCE_READY</option><option>DIAGNOSED</option><option>VERIFIED</option><option>ACTION_CHOSEN</option><option>POLICY_APPROVED</option><option>POLICY_BLOCKED</option><option>SCHEDULED</option><option>EXECUTED</option><option>WAITING_FOR_OUTCOME</option><option>RECOVERED</option><option>STOPPED</option><option>ESCALATED</option>
-              </select>
-              <button id="apply-case-filter" class="button">Apply</button>
-            </div>
-          </div>
-          <div id="cases-table" class="table-wrap"></div>
-        </section>
-      </section>
-
-      <section id="activity-view" class="view">
-        <section class="panel">
-          <div class="panel-header"><p class="eyebrow">Append-only audit stream</p><h3>Live Recovery Activity</h3><p class="muted">Newest events first. This is the easiest view to demo the pipeline while tests are running.</p></div>
-          <div id="activity-list" class="activity-list"></div>
-        </section>
-      </section>
-
-      <section id="escalations-view" class="view">
-        <section class="panel"><div class="panel-header"><p class="eyebrow">Human-in-the-loop</p><h3>Recovery Review Queue</h3></div><div id="escalation-list" class="queue-grid"></div></section>
-      </section>
-
-      <section id="policy-view" class="view">
-        <div class="grid two-col">
-          <section class="panel"><div class="panel-header"><p class="eyebrow">Control plane</p><h3>Deterministic Policy</h3></div><div id="policy-cards" class="policy-grid"></div></section>
-          <section class="panel accent-panel"><p class="eyebrow">Trust boundary</p><h3>AI never gets final authority over money.</h3><div class="trust-flow"><span>LLM diagnosis</span><b>→</b><span>Verifier</span><b>→</b><span>Policy gate</span><b>→</b><span>ActionService</span><b>→</b><span>Razorpay outcome</span></div></section>
-        </div>
-      </section>
-    </main>
-  </div>
-
-  <div id="case-drawer" class="drawer" aria-hidden="true">
-    <div class="drawer-backdrop" data-close-drawer></div>
-    <aside class="drawer-panel wide-drawer">
-      <div class="drawer-header"><div><p class="eyebrow">Live Recovery Case</p><h2 id="drawer-title">Case detail</h2><p id="drawer-sync" class="muted compact"></p></div><button class="icon-button" data-close-drawer aria-label="Close">×</button></div>
-      <div id="drawer-content" class="drawer-content"></div>
-    </aside>
-  </div>
-
-  <div id="toast" class="toast" role="status"></div>
-  <script src="/dashboard.js" defer></script>
+  <footer class="landing-shell"><span>Recovery OS</span><span>AI reasons. Deterministic systems authorize.</span></footer>
+  <script src="/landing.js" defer></script>
 </body>
 </html>

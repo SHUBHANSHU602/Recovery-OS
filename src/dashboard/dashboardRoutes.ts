@@ -1,8 +1,13 @@
-import { Router } from "express";
+import { Router, type Request } from "express";
 import type { Pool } from "pg";
 import { POLICY_LIMITS } from "../policy/policyGate";
 import { DEFAULT_CONTACT_WINDOW, refreshRecoveryPriority } from "../intelligence/recoveryIntelligence";
 import { createPromiseToPay, listPromisesForCase } from "../intelligence/paymentPromises";
+import { runAgentTurn } from "../agent/conversationalAgent";
+import { requestPaymentLink, recordOutboundContact } from "../execution/actionService";
+import { scheduleBackoffRetry } from "../execution/scheduledActions";
+import { createHumanEscalation } from "../recovery/recoveryStore";
+import { logAuditEvent } from "../ledger/auditLog";
 import {
   getDashboardSummary,
   getRecoveryCase,
@@ -10,6 +15,19 @@ import {
   listHumanEscalations,
   listRecoveryCases,
 } from "./dashboardService";
+import { getCaseConversation, getCaseRuntimeState, listRecentActivity } from "./liveConsoleService";
+
+function testConsoleEnabled(req: Request): boolean {
+  if (process.env.RECOVERY_ENABLE_TEST_CONSOLE !== "true") return false;
+  const address = req.socket.remoteAddress ?? "";
+  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+}
+
+function requireTestConsole(req: Request): void {
+  if (!testConsoleEnabled(req)) {
+    throw new Error("Local test console is disabled. Set RECOVERY_ENABLE_TEST_CONSOLE=true and access from localhost.");
+  }
+}
 
 export function createDashboardRouter(pool: Pool) {
   const router = Router();
@@ -20,6 +38,31 @@ export function createDashboardRouter(pool: Pool) {
     } catch (error: any) {
       console.error("Dashboard summary failed:", error.message);
       res.status(500).json({ error: "Unable to load dashboard summary" });
+    }
+  });
+
+  router.get("/live/status", async (req, res) => {
+    try {
+      await pool.query("SELECT 1");
+      res.json({
+        live: true,
+        database: "connected",
+        generatedAt: new Date().toISOString(),
+        pollSeconds: 3,
+        testConsoleEnabled: testConsoleEnabled(req),
+      });
+    } catch (error: any) {
+      res.status(503).json({ live: false, database: "unavailable", error: error.message });
+    }
+  });
+
+  router.get("/activity", async (req, res) => {
+    try {
+      const limit = Number(req.query.limit ?? 40);
+      res.json(await listRecentActivity(pool, Number.isFinite(limit) ? limit : 40));
+    } catch (error: any) {
+      console.error("Dashboard activity failed:", error.message);
+      res.status(500).json({ error: "Unable to load live recovery activity" });
     }
   });
 
@@ -56,6 +99,113 @@ export function createDashboardRouter(pool: Pool) {
     } catch (error: any) {
       console.error("Dashboard case detail failed:", error.message);
       res.status(500).json({ error: "Unable to load recovery case" });
+    }
+  });
+
+  router.get("/cases/:caseId/runtime", async (req, res) => {
+    try {
+      const caseId = Number(req.params.caseId);
+      if (!Number.isInteger(caseId) || caseId <= 0) {
+        res.status(400).json({ error: "Invalid recovery case id" });
+        return;
+      }
+      const result = await getCaseRuntimeState(pool, caseId);
+      if (!result) {
+        res.status(404).json({ error: "Recovery case not found" });
+        return;
+      }
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ error: "Unable to load case runtime state" });
+    }
+  });
+
+  router.get("/cases/:caseId/conversation", async (req, res) => {
+    try {
+      const caseId = Number(req.params.caseId);
+      const result = await getCaseConversation(pool, caseId);
+      if (!result) {
+        res.status(404).json({ error: "Recovery case not found" });
+        return;
+      }
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ error: "Unable to load recovery conversation" });
+    }
+  });
+
+  router.post("/cases/:caseId/conversation", async (req, res) => {
+    try {
+      requireTestConsole(req);
+      const caseId = Number(req.params.caseId);
+      const message = String(req.body?.message ?? "").trim();
+      if (!message) {
+        res.status(400).json({ error: "message is required" });
+        return;
+      }
+      const item = await getRecoveryCase(pool, caseId);
+      if (!item) {
+        res.status(404).json({ error: "Recovery case not found" });
+        return;
+      }
+      if (!item.customerEmail) {
+        res.status(409).json({ error: "Recovery case has no customer email" });
+        return;
+      }
+      const reply = await runAgentTurn(item.originalEventId, item.customerEmail, item.amountAtRisk, message);
+      res.json({ reply });
+    } catch (error: any) {
+      res.status(409).json({ error: error.message });
+    }
+  });
+
+  router.post("/cases/:caseId/test-action", async (req, res) => {
+    try {
+      requireTestConsole(req);
+      const caseId = Number(req.params.caseId);
+      const action = String(req.body?.action ?? "");
+      const item = await getRecoveryCase(pool, caseId);
+      if (!item) {
+        res.status(404).json({ error: "Recovery case not found" });
+        return;
+      }
+
+      if (action === "refresh_priority") {
+        res.json(await refreshRecoveryPriority(pool, caseId));
+        return;
+      }
+      if (action === "retry_now") {
+        const result = await requestPaymentLink(
+          item.originalEventId,
+          "retry_now",
+          null,
+          `${item.originalEventId}_console_retry_now_${Date.now()}`
+        );
+        res.json(result);
+        return;
+      }
+      if (action === "retry_with_backoff") {
+        await scheduleBackoffRetry(item.originalEventId, null, 1);
+        res.json({ status: "scheduled", delaySeconds: 1 });
+        return;
+      }
+      if (action === "whatsapp_nudge" || action === "offer_alternate_payment_method") {
+        const opening = action === "whatsapp_nudge"
+          ? "Hi! We noticed your recent payment did not go through. Would you like a fresh payment link to try again?"
+          : "Hi! Your payment could not be completed. Would you like to try a different payment method?";
+        res.json(await recordOutboundContact(item.originalEventId, action, opening));
+        return;
+      }
+      if (action === "escalate_to_human") {
+        await createHumanEscalation(pool, caseId, item.originalEventId, "merchant_console_test_escalation");
+        await logAuditEvent(item.originalEventId, "merchant_console_test_escalation", { caseId });
+        res.json({ status: "escalated" });
+        return;
+      }
+
+      res.status(400).json({ error: "Unsupported test action" });
+    } catch (error: any) {
+      res.status(409).json({ error: error.message });
     }
   });
 

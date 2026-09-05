@@ -3,6 +3,7 @@ const deliveriesBody = document.getElementById('deliveries');
 const sendForm = document.getElementById('send-form');
 const resultBox = document.getElementById('send-result');
 const toast = document.getElementById('toast');
+let refreshing = false;
 
 function showToast(message) {
   toast.textContent = message;
@@ -51,7 +52,9 @@ function renderDeliveries(items) {
   `).join('') : '<tr><td colspan="7">No channel attempts yet.</td></tr>';
 }
 
-async function refresh() {
+async function refresh({ quiet = false } = {}) {
+  if (refreshing) return;
+  refreshing = true;
   try {
     const [status, deliveries] = await Promise.all([
       fetchJson('/api/channels/status'),
@@ -60,7 +63,9 @@ async function refresh() {
     renderProviders(status.providers || []);
     renderDeliveries(deliveries.items || []);
   } catch (error) {
-    showToast(error.message);
+    if (!quiet) showToast(error.message);
+  } finally {
+    refreshing = false;
   }
 }
 
@@ -87,5 +92,8 @@ sendForm.addEventListener('submit', async (event) => {
   }
 });
 
-document.getElementById('refresh').addEventListener('click', refresh);
+document.getElementById('refresh').addEventListener('click', () => refresh());
+const linkedCase = new URLSearchParams(window.location.search).get('caseId');
+if (linkedCase) document.getElementById('case-id').value = linkedCase;
 refresh();
+setInterval(() => { if (!document.hidden) refresh({ quiet: true }); }, 3000);

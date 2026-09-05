@@ -1,97 +1,187 @@
-# Debug Log
+# Recovery OS — Debugging Record
 
-## Day 1
-1. **International test card rejected.** Used 4111 1111 1111 1111 (generic international Visa test number) — account only accepts domestic cards. Fix: used Razorpay's documented Indian-scenario test cards (4100 2800 0009 0000).
-2. **ts-node MODULE_NOT_FOUND on valid path.** ts-node failed to resolve src/ingestion/server.ts on Windows + Node 24.11.0 — internal project-dir resolution bug. Tried tsx as an alternative, hit a separate ESM resolution error. Fix: deferred TypeScript to Day 4, wrote Day 1's webhook receiver in plain CommonJS JS to stay unblocked.
-3. **Error code mismatch in webhook payload.** Test card selected for payment_timed_out scenario, but the actual webhook payload showed error_code: BAD_REQUEST_ERROR instead. Manual "Failure" click in test mode doesn't preserve the specific test-card error type. Noted for Day 3: synthetic batch generator will be the reliable source of varied error codes, not manual test-mode failures.
+This file keeps the important engineering failures that shaped the current system. Each entry explains **what broke, why it broke, and how it was fixed** in plain language.
 
-## Day 2
-1. **`Cannot find module 'pg'`.** Installed @types/pg (type definitions only) but not the actual pg runtime package. Fix: npm install pg.
-2. **`password authentication failed for user "postgres"`.** Left the literal placeholder "YOUR_POSTGRES_PASSWORD" in server.ts instead of the real password. Fix: replaced with actual value, then migrated to .env shortly after to avoid hardcoding credentials in source at all.
-3. **No resend/replay option found in Razorpay's test-mode webhook dashboard.** Used curl with a duplicate x-razorpay-event-id header to replay a request directly against the local server instead — proved dedup without needing dashboard support for it.
+## 1. Duplicate Razorpay Payment Links were created on reruns
 
-## Day 3
-1. **Correlated-failures signal was meaningless on first synthetic batch.** All 10 synthetic events were inserted back-to-back in one script run, giving them near-identical timestamps — so the 30-minute correlation window matched every event at the same bank regardless of intended cause, not just the deliberate systemic_bank_outage cluster. Non-outage events showed false-positive correlation counts (1-2) instead of 0. Fix: added explicit offsetMinutes per template so isolated events are hours/days apart and only the outage cluster falls within the same 30-min window. Re-ran and confirmed correlatedFailuresAtSameBank: 3 only on the outage cluster, 0 everywhere else.
-2. **customerFailureCount untested** — no synthetic customer currently has more than one failure, so this signal hasn't been validated against real repeat-failure data yet. To be exercised in Day 4 once diagnosis runs against events with actual customer history, or tested manually before then.
+- **What broke:** Re-running the same recovery flow created multiple Razorpay Payment Links for the same failed payment.
+- **Why:** The idempotency key used an auto-increment database row ID. Every rerun created a new row, so every rerun also looked like a brand-new action.
+- **Fix:** Idempotency was moved to stable business identity: failed event + action + logical attempt number. The action row is now claimed in PostgreSQL before the external Razorpay call.
+- **Extra protection:** Upstream diagnosis/intervention reruns also skip work that already exists.
+- **Result:** The same logical attempt cannot execute twice, while legitimate later retry attempts can still run.
 
-## Day 4
-1. **Silent extra API call from unguarded main().** diagnose.ts's main() ran automatically on import (no require.main === module guard), so importing diagnose() into diagnoseBatch.ts triggered one extra, unlogged diagnosis call before the real batch loop started. This caused the batch to hit Gemini's rate limit one call earlier than expected. Fix: wrapped main() in an explicit require.main === module check so it only auto-runs when the file is executed directly.
-2. **429 rate limit mid-batch.** Gemini free tier: 5 requests/minute for gemini-3.6-flash. Batch of 10 diagnosis calls with no delay hit this after ~5-6 calls. Fix: added 13s sleep between calls in diagnoseBatch.ts. Flagged as a constraint for Day 10 (evaluation) and Day 12 (live demo) — full batches must be pre-run and cached, not run live on camera.
+## 2. Webhook deduplication could lose real work
 
-## Day 5
-1. **diagnoseBatch.ts became a duplicate of diagnose.ts.** At some point diagnoseBatch.ts's real content (the batch loop + verifier integration) was overwritten with a full copy of diagnose.ts's single-event logic, including the old llama-3.3-70b-versatile model name -- explains why fixing diagnose.ts alone didn't resolve the 404. Fix: restored diagnoseBatch.ts to import diagnose() and verify() rather than containing its own copy of either.
-2. **Groq deprecated llama-3.3-70b-versatile** (confirmed via Groq's own deprecation notice) -- switched to openai/gpt-oss-120b, their current recommended general-purpose/reasoning model.
-3. **9/10 accuracy on batch_1 with Groq (vs 10/10 with Gemini).** One ambiguous-labeled event was confidently misdiagnosed as insufficient_funds. Verifier did not catch it, since the claim didn't contradict the evidence (0 correlated failures is consistent with insufficient_funds) -- it just wasn't the most defensible read of genuinely thin evidence. Verifier checks evidence-consistency, not confidence-calibration on low-information cases. Logged as a known limitation, not patched today (would need a new invariant, e.g. flagging high-confidence claims when error_description is generic and correlation is near-zero).
+- **What broke:** A webhook could be stored successfully, downstream processing could fail, and a Razorpay retry of the same event could then be discarded as a duplicate.
+- **Why:** The first implementation treated “event received” and “event fully processed” as the same state.
+- **Fix:** Added a durable `webhook_deliveries` inbox with `RECEIVED`, `PROCESSING`, `PROCESSED`, and `FAILED` states.
+- **Result:** Failed or stale processing can be reclaimed safely instead of being lost.
 
-## Day 6
-1. **interveneOnBatch.ts ran on tripled data.** diagnoses table had 3 stale rows per event from repeated Day 5 troubleshooting runs; interveneOnBatch's join against recovery_batches pulled all 3 copies per event with no dedup, producing 30 intervention runs instead of 10. Fix: added a DELETE at the start of diagnoseAllInBatch so every rerun clears prior diagnoses for that batch first, preventing stale accumulation going forward.
-2. **Top-level await crashed the CJS build.** Pasted the new DELETE query's await outside diagnoseAllInBatch's function body (at module top level) -- CommonJS output doesn't support top-level await. Fix: moved it inside the async function, as the very first statement.
+## 3. A database transaction was not guaranteed to use one connection
 
-## Day 7 -- critical bug: idempotency key bound to the wrong identity
-1. **Idempotency key used a surrogate database row ID instead of stable business identity.** execute.ts originally built the key as `intervention_${interventionId}`, where interventionId is an auto-increment row ID. Upstream, diagnoseBatch.ts and interveneOnBatch.ts had no guard against re-processing an event that was already diagnosed/actioned -- reruns silently inserted new diagnosis/intervention rows for the same events instead of skipping them. Each new intervention row got a fresh auto-increment ID, which meant a fresh idempotency key, which meant the idempotency check correctly saw "never seen this key" every time -- and dutifully executed a brand-new real Razorpay payment_links.create call. Result: 5 genuine duplicate payment links created in Razorpay test mode across repeated runs, before being caught.
-   - No real money moved (test mode throughout), but this is exactly the failure class the whole idempotency design exists to prevent, and it happened because the key was keyed to *how many times we redid the work* rather than *what the work actually was*.
-   - Fix (two layers): (1) execute.ts's idempotency key changed to `${eventId}_${finalAction}` -- stable business identity, immune to upstream duplication no matter how many times a row gets re-inserted. (2) diagnoseBatch.ts and interveneOnBatch.ts both got check-before-insert guards (skip if a diagnosis/intervention already exists for this event), fixing the actual source of duplicate rows rather than only patching the symptom at the execution layer.
-   - Lesson for the README/pitch: an idempotency key must bind to the identity of the *work being done*, never to a database row ID that changes every time the work is accidentally redone.
+- **What broke:** The first transaction code used `pool.query("BEGIN")`, several more `pool.query(...)` calls, then `pool.query("COMMIT")`.
+- **Why:** A PostgreSQL connection pool may send those calls to different physical connections.
+- **Fix:** Multi-statement transactions now use `pool.connect()`, run `BEGIN / COMMIT / ROLLBACK` on that one checked-out client, and release it in `finally`.
+- **Result:** Webhook persistence and other transactional writes now have real transaction boundaries.
 
-## Day 8
-1. **Agent kept asking for info the backend already had.** First implementation passed customerEmail/amount as function arguments but never included them in the system prompt -- the LLM only reasons over what's in its context, so it correctly (from its own perspective) asked the customer for data it was never given. Fix: built the system prompt per-conversation with known context explicitly stated.
-2. **Fix didn't take effect on retest -- stale conversation row.** conversations table already had a row for the test event from the first (buggy) run, with the old contextless system prompt baked into its stored messages. runAgentTurn only builds a fresh system prompt for a brand-new conversation; an existing row reuses its stored history regardless of code changes. Fix: deleted the stale row before retesting.
-3. **NOT NULL constraint on actions.intervention_id blocked conversational payment links.** Migration (ALTER TABLE ... DROP NOT NULL) was run once but silently didn't take. A real Razorpay payment link was created successfully but the subsequent INSERT into actions failed, meaning the link existed in Razorpay but had no local record. Fix: reran and verified the ALTER actually applied via `\d actions` before retrying.
+## 4. API success was incorrectly treated as recovered money
 
-## Day 9 -- first full end-to-end run surfaced two integration bugs
-1. **Accuracy metric silently broke when skip-guards were added.** diagnoseBatch.ts's "correct" counter only incremented inside the per-event loop body, which is skipped entirely for already-diagnosed events. First full rerun showed "Accuracy: 0/10" even though all 10 diagnoses were still correct and untouched. Fix: recompute accuracy from a fresh query against current stored diagnoses at the end of the run.
-2. **psql couldn't display a stored message containing a rupee symbol.** SELECT on a conversations.messages row failed with a UTF8/WIN1252 encoding error — a Windows console display issue, not data corruption. Fixed for viewing via `SET client_encoding = 'UTF8'` + `jsonb_pretty()`.
+- **What broke:** Early evaluation logic could treat successful action execution or Payment Link creation as recovery.
+- **Why:** Execution success and business outcome were mixed together.
+- **Fix:** Added durable `recovery_cases`. Only a trusted `payment_link.paid` outcome can move a case to `RECOVERED` and increase `recovered_amount`.
+- **Result:** Creating a link, sending a message, or scheduling a retry cannot inflate recovered revenue.
 
-## Day 10
-1. **diagnoseBatch.ts's accuracy-recompute fix landed in the wrong scope on a previous edit** -- pasted inside a non-async `.catch()` block instead of at the end of the async function, causing "await outside async function". Fix: recreated the file cleanly with the fix correctly placed inside diagnoseAllInBatch.
-2. **generateSyntheticBatch.ts got corrupted by a paste-into-already-open-file mistake**, producing duplicate top-level declarations. Fix: deleted and recreated the file cleanly.
-3. **6 real actions failed with Razorpay "Too many requests" during the 25-event evaluation run** — genuine Razorpay test-mode rate limiting under real API call volume, not a diagnosis/decision bug.
-4. **customer20's repeat-failure case never exercised the policy gate's retry cap** because its chosen actions were non-retry paths. The cap remained proven only by the isolated adversarial policy test at that point.
+## 5. Diagnosis could use information from the future
 
-## Track 3 P0 hardening — 2026-09-02
-1. **Webhook endpoint trusted event IDs but not webhook authenticity.** Fix: raw-body HMAC-SHA256 verification with `timingSafeEqual` before parsing/persistence.
-2. **Event-time evidence leaked future failures.** Fix: customer-history and same-bank queries now stop strictly before the event timestamp; `evidenceCutoffAt` is stored.
-3. **Policy safety context was hard-coded in the integrated batch path.** Fix: `loadPolicyContext()` reads retry attempts, outbound contacts, terminal state, and opt-out state from trusted persisted data.
-4. **Agent-side payment-link generation bypassed the central gate.** Fix: all payment-link side effects now go through `ActionService`; trusted amount/customer identity are reloaded from the stored event.
-5. **SELECT-before-call idempotency was concurrency-unsafe.** Fix: `ActionService` claims a pending action via `INSERT ... ON CONFLICT DO NOTHING RETURNING id` before any Razorpay call.
-6. **Outbound opening message was recorded as a customer/user turn.** Fix: opening messages are stored as `assistant`; `runAgentTurn()` is inbound-only.
-7. **Action success was incorrectly used as revenue recovery.** Fix: `recovery_cases` separates action execution from business outcome; only trusted `payment_link.paid` can mark `RECOVERED` and record recovered amount.
-8. **Webhook ingestion stopped at persistence.** Fix: `payment.failed` creates a durable `recovery_jobs` row and starts a restartable recovery pipeline.
-9. **Verification limitation of connector-driven patch.** Static repository review/mutation was possible, but no local Postgres/Razorpay/Groq environment was attached to that session, so runtime E2E was not claimed as passed.
-10. **P1 debt left visible at that point.** Real delayed backoff, 429 retry/jitter, DB-level audit tamper resistance, runtime schema setup, and durable human escalation were deferred rather than claimed complete.
+- **What broke:** Same-bank correlation and customer-history queries originally allowed later failures to influence an earlier diagnosis.
+- **Why:** Evidence queries were not cut off at the failed payment’s event time.
+- **Fix:** Every evidence query now stops strictly before the event timestamp, and the evidence cutoff is stored.
+- **Result:** Recovery decisions use only information that was actually knowable at decision time.
 
-## Track 3 P1 hardening — 2026-09-02
-1. **Webhook dedupe conflated “received” with “fully processed.”** The P0 route inserted into `events`, then performed downstream processing. If downstream work failed after the insert, Razorpay could retry the same `x-razorpay-event-id`; the duplicate insert would be treated as already processed, permanently losing a `payment.failed` handoff or a `payment_link.paid` recovery transition. Fix: added `webhook_deliveries` with `RECEIVED / PROCESSING / PROCESSED / FAILED`, atomic claim/reclaim rules, stale-processing recovery, and separate persistence from processing. Duplicate delivery now retries failed work instead of discarding it.
-2. **The first attempt to make webhook persistence transactional used `pool.query("BEGIN")` / `pool.query("COMMIT")`.** With `pg.Pool`, those calls are not guaranteed to use the same physical connection, so the apparent transaction could be fake. Fix: `persistWebhook()` now checks out one client with `pool.connect()`, performs BEGIN/inserts/COMMIT on that client, rolls back on error, and releases it in `finally`.
-3. **Stable action-level idempotency blocked legitimate retries.** `${eventId}_${desiredAction}` fixed accidental duplicate execution, but it also meant a valid second `retry_with_backoff` had the exact same key and was blocked forever, contradicting the policy's max-3-retries model. Fix: idempotency now belongs to a concrete logical attempt (`..._attempt_1`, `..._attempt_2`, `..._attempt_3`). Each attempt is independently idempotent while later legitimate attempts remain possible.
-4. **`retry_with_backoff` was only a name; execution was immediate.** Both `retry_now` and `retry_with_backoff` previously called Payment Links immediately. Fix: `retry_with_backoff` now persists a `scheduled_actions` row with `run_at`; the worker claims due jobs, performs the action later, honors `Retry-After`, otherwise uses bounded exponential backoff + deterministic jitter, and retries transient 429/5xx/network failures up to the cap.
-5. **First scheduler reschedule logic reused attempt number 2 repeatedly.** The initial implementation derived the next attempt from each scheduled row's local `attempt_count`; every fresh row started from zero, so a second transient failure tried to schedule attempt 2 again and hit the unique key. Fix: next logical attempt number is derived from all scheduled rows for the recovery case, so identities advance monotonically across rows.
-6. **Crash recovery around a claimed external action is inherently ambiguous without provider-side exactly-once support.** A process can die after claiming a DB action and around the external API call. Blindly replaying that exact attempt could create a duplicate Payment Link. Fix: a reclaimed scheduler job that finds its exact action key already claimed does not issue another external call; it fails closed, records the ambiguity, and creates a human escalation work item.
-7. **Original-payment success was not a terminal signal.** Recovery could continue even if the original Razorpay payment later became captured. Fix: trusted `payment.captured` now finds matching open recovery cases by `original_payment_id` and moves them to `STOPPED` with reason `original_payment_captured`. Scheduled actions check terminal state before executing.
-8. **Action selection was passed the wrong metric.** `customerFailureCount` in `chooseAction()` was populated from `policyContext.automatedRetryCount`, which is a different concept. Fix: action selection now receives the actual causal `evidence.customerFailureCount` plus amount at risk, same-bank correlation, retry/contact state, and previous recovery outcomes.
-9. **Action-selection AI was too close to a switch statement.** The old prompt nearly mapped root cause directly to one action. Fix: the model now receives multiple decision-relevant signals and is explicitly asked to reason over trade-offs; deterministic policy still independently enforces hard limits afterward.
-10. **Synthetic outage labels were not causal after future-evidence leakage was removed.** The earliest events in an outage cluster were labeled `systemic_bank_outage` even though, at their decision time, zero or one prior same-bank failures existed. That made the answer key demand information the system correctly did not have. Fix: early cluster observations are now labeled `ambiguous`; only later observations with >=2 earlier corroborating failures are labeled outage. Added identical `GATEWAY_ERROR / Payment could not be processed` cases whose correct label changes only with context.
-11. **Policy/evaluation queries silently depended on the old idempotency-key shape.** After adding per-attempt keys, the policy retry counter and evaluator's action query could miss agent/scheduled attempts. Fix: both now match event-scoped key prefixes rather than one legacy exact string.
-12. **Human escalation existed only as state/logging.** There was no durable unit of work for an operator. Fix: added `human_escalations` keyed to the recovery case; policy, scheduler, executor, and agent escalation paths create/update this work item.
-13. **The audit trail was append-only only by application convention.** `logAuditEvent()` only inserted, but ordinary UPDATE/DELETE remained possible. Fix: schema/migration now installs a PostgreSQL trigger rejecting UPDATE and DELETE on `audit_log`. README wording was changed to “database-enforced append-only audit trail,” not cryptographic immutability.
-14. **Repository reproducibility was broken.** `package.json` contained TypeScript compiler settings instead of a valid package manifest, tracked `node_modules` remained in Git, the project lived under an unnecessary `recovery-os/` wrapper, no reproducible SQL migration path existed, and Docker Compose was referenced but absent. Fix: restored valid package scripts/metadata, corrected `tsconfig.json`, added `.env.example`, `docker-compose.yml`, SQL migrations and a migration runner, removed tracked `node_modules`, and flattened the project to the repository root with standard `README.md`.
-15. **Old README metrics became invalid after correctness fixes.** The previous 96% / 67.6% headlines were based on the old answer key and on action initiation rather than confirmed recovered money. Fix: removed those headlines from the current README and require the hardened evaluator to be rerun before publishing replacement numbers.
-16. **Runtime verification status for this P1 connector session.** Code paths, schemas, queries, and cross-file contracts were statically reviewed and updated through GitHub. This session still does not have the repository's local Postgres/Razorpay/Groq secrets/runtime, so no claim is made that the new E2E matrix passed here. The repository now includes the commands needed to run that validation locally: `npm run db:migrate`, `npm run typecheck`, `npm run test:core`, `npm start`, and `npm run evaluate`.
+## 6. Retry idempotency became too strict
 
-## Phase B — 2026-09-04
-1. **Phase-B integration test polluted the later worker smoke test.** The Promise-to-Pay test created a synthetic failed-payment recovery case through `ensureRecoveryCase()`, which correctly also created a `recovery_jobs` row in `PENDING`. The unit/integration assertions passed, but the subsequent CI server smoke test started the real recovery worker, which could claim that leftover synthetic job and enter provider-backed recovery logic using CI placeholder credentials. Result: migrations, typecheck, and deterministic core tests passed, while the server/background-worker smoke stage failed. **Fix:** after Phase-B assertions finish, the test explicitly marks its synthetic recovery job `DONE`, preserving the tested Promise-to-Pay rows while ensuring the fixture cannot be consumed by a later worker process. This is a test-isolation bug, not a production recovery-flow failure.
+- **What broke:** After fixing duplicate actions, a legitimate second `retry_with_backoff` could be blocked as a duplicate.
+- **Why:** The idempotency key represented only “event + action,” not a specific retry attempt.
+- **Fix:** Retry identity now includes the logical attempt number, for example `..._attempt_1`, `..._attempt_2`, `..._attempt_3`.
+- **Result:** Each attempt is independently idempotent while the bounded retry sequence still works.
 
-## Phase C — 2026-09-05
-1. **Omnichannel code failed CI typecheck because `String.prototype.replaceAll` was outside the repository's current TypeScript library target.** Migrations completed successfully, then `tsc --noEmit` raised TS2550 in `channelService.ts` for the root-cause formatter and voice-message sanitizer. **Fix:** replaced those `replaceAll` calls with target-compatible `split(...).join(...)` operations. The subsequent full PR validation passed migrations, typecheck, deterministic core tests, server/dashboard/background-worker smoke tests.
+## 7. `retry_with_backoff` originally retried immediately
 
-## Post-merge baseline hardening — 2026-09-05
-1. **Phase D merge silently removed Phase C tests from `test:core`.** PR #9 had `test:channels` wired into the aggregate suite, but PR #10's package.json merge kept the new benchmark test and dropped the channel test. CI stayed green because the aggregate command itself still succeeded. **Fix:** restored `test:channels` and kept `test:benchmark`; CI now runs policy, verifier, dashboard, intelligence, channels, and benchmark tests together.
-2. **Phase C default recovery messages could omit a valid Razorpay Payment Link.** `channelService.ts` queried successful action rows using `status = 'SUCCESS'`, while `ActionService` persists successful calls as lowercase `success`. The query therefore missed valid Payment Link rows. **Fix:** use `status = 'success'` and additionally require `razorpay_api_call = 'payment_links.create'` so an unrelated successful action cannot supply the message link. Added a DB-backed regression test that stores a successful Payment Link action and verifies the generated channel message contains its `short_url`.
-3. **Manual Phase C sends could bypass quiet-hours policy.** Automated contact paths already defer during configured quiet hours, but `sendRecoveryChannel()` did not check the same contact window. **Fix:** manual channel execution now fails closed during quiet hours and reports the next allowed contact time. Added a deterministic quiet-hours regression assertion.
-4. **The 24-hour customer contact cap was check-then-send and concurrency-unsafe.** Two simultaneous channel requests could both observe a zero contact count, both call a provider, and only then insert outbound-contact rows. **Fix:** Phase C now obtains a per-customer PostgreSQL advisory transaction lock, rechecks the 24-hour count under that lock, and inserts a `pending` outbound-contact reservation before provider execution. Provider success finalizes that reservation; provider failure removes it. Added a concurrent DB-backed test that proves only one of two simultaneous sends succeeds and only one contact row is persisted.
-5. **Replacing a Promise-to-Pay cancelled the old promise row but left its reminder job pending.** The stale reminder could later wake up and act on the replacement promise earlier than intended. **Fix:** replacement now returns the cancelled promise IDs and cancels their still-pending reminder `scheduled_actions` in the same transaction before inserting the new promise/reminder. Phase B tests now create two promises and verify the first reminder is `CANCELLED` while the replacement reminder remains `PENDING`.
-6. **Phase C runtime paths were not part of the server smoke test.** CI checked health, dashboard APIs and the merchant UI, but not `/channels.html` or channel APIs. **Fix:** the smoke test now verifies the channel console, provider-status API, and deliveries API in addition to the existing server/dashboard/worker checks.
-7. **Phase C architecture notes were lost when Phase D updated `DECISION.md`.** The code survived the merge, but the decision record no longer documented the shared channel boundary, provider truthfulness, or the fact that channel delivery is not recovered revenue. **Fix:** restored the Phase C section and retained Phase D, then documented the post-merge contact-claim and CI-composition decisions separately.
+- **What broke:** The action name said “backoff,” but execution still happened immediately.
+- **Why:** The first version had no durable scheduler.
+- **Fix:** Added `scheduled_actions` with `run_at` timestamps and a worker that claims due work.
+- **Retry behavior:** Honor `Retry-After` when present; otherwise use bounded exponential backoff with deterministic jitter for retryable 429/5xx/network failures.
+- **Result:** Retries survive process restarts and stop after the configured automated-attempt limit.
 
-## Final AI recovery-agent phase — 2026-09-05
-1. **The first PR #12 CI run failed at TypeScript typecheck after all five migrations had applied.** `aiDecisionBenchmark.ts` declared shared scenario defaults with `as const`, so the empty `priorCustomerOutcomes` and `strategyEvidence` arrays became `readonly []`. Those readonly arrays were not assignable to the mutable arrays required by `RecoveryPlanContext`, producing repeated TS2322 errors across the benchmark scenarios. **Fix:** typed the shared defaults explicitly as `Omit<RecoveryPlanContext, "trigger" | "rootCause">` and removed the const assertion. The next full CI run passed migrations, typecheck, deterministic/core tests, and server/dashboard/channel/background-worker smoke checks. Real Groq planning quality and real Razorpay end-to-end behavior are still intentionally reserved for local validation after merge.
+## 8. Scheduler retries reused the same attempt number
+
+- **What broke:** A second transient failure tried to schedule “attempt 2” again and collided with the unique key.
+- **Why:** Attempt numbering was calculated from the current row instead of the full recovery case history.
+- **Fix:** The next attempt number is derived from all scheduled attempts for that recovery case.
+- **Result:** Retry identities advance correctly across separate scheduler rows.
+
+## 9. Crash recovery could accidentally repeat an external side effect
+
+- **What broke:** If a worker crashed after claiming an action but around the Razorpay call, the system could not always know whether that exact external side effect happened.
+- **Why:** There is no guaranteed exactly-once boundary spanning PostgreSQL and an external provider call.
+- **Fix:** If the exact claimed attempt is found in an ambiguous state after recovery, the system does **not** blindly repeat it. It fails closed and creates a human escalation.
+- **Result:** Safety is preferred over accidentally creating a duplicate money-adjacent action.
+
+## 10. Recovery continued after the original payment succeeded
+
+- **What broke:** The system could continue recovery even after the original Razorpay payment became captured.
+- **Why:** `payment.captured` was not treated as a terminal business signal.
+- **Fix:** Trusted original-payment capture moves the case to `STOPPED` with `original_payment_captured`, cancels pending work, and does not count the money as Recovery OS recovered revenue.
+- **Result:** Customers are not asked to pay twice.
+
+## 11. Contact limits were vulnerable to concurrent sends
+
+- **What broke:** Two channel requests could both check the 24-hour contact count at the same time and both send.
+- **Why:** The flow was “check, send, then record,” which is race-prone.
+- **Fix:** Recovery OS now obtains a per-customer PostgreSQL advisory transaction lock, rechecks the count, and creates a pending contact reservation before provider execution.
+- **Result:** Concurrent requests cannot both consume the same contact slot.
+
+## 12. Manual channel sends could bypass quiet hours
+
+- **What broke:** Automated recovery respected quiet hours, but a manual channel action did not.
+- **Why:** The manual path did not reuse the same contact-window rule.
+- **Fix:** Manual channel execution now checks quiet hours before sending and fails closed until the next allowed time.
+- **Result:** Automated and operator-triggered outreach follow the same policy boundary.
+
+## 13. Replacing a Promise-to-Pay left the old reminder active
+
+- **What broke:** Replacing a customer’s payment promise cancelled the old promise row but left its scheduled reminder pending.
+- **Why:** Promise replacement and reminder cancellation were handled separately.
+- **Fix:** Replacement now cancels the old pending promise and its pending reminder in the same transaction before creating the new promise/reminder.
+- **Result:** Only the newest customer commitment can trigger future reminder work.
+
+## 14. The AI planner underperformed a simple rules baseline
+
+- **What broke:** On the 12-scenario contextual decision benchmark, static rules scored `9/12`, while the AI planner initially scored between `6/12` and `7/12` and changed answers between runs.
+- **Why:** Important business invariants were only implied in the prompt, and the model call was not deterministic.
+- **Fix:** Set planner temperature to `0`, strengthened the planning instructions, and added deterministic business guardrails based on real context: retry count, contact count, diagnosis confidence, prior action, Promise-to-Pay state, and historical strategy outcomes.
+- **Important:** The guardrails do not inspect benchmark scenario IDs.
+- **Result:** Two consecutive local runs scored `12/12` for AI planner + guardrails versus `9/12` for static rules + the same policy gate. Full core regression tests also passed.
+
+## 15. Conversational recovery initially used stale or missing context
+
+- **What broke:** The agent asked customers for information the backend already knew, and later code fixes appeared not to work in old conversations.
+- **Why:** Trusted amount/customer data was not included in the model context, and existing conversation rows kept their old system context.
+- **Fix:** The agent receives trusted recovery context from the backend and refreshes the live recovery context on every inbound turn.
+- **Result:** The model reasons over the current verified diagnosis, plan, retry/contact state, and Promise-to-Pay without redefining trusted identity or amount.
+
+## 16. Conversational Payment Links could be created but fail local persistence
+
+- **What broke:** Razorpay successfully created a Payment Link, then the local action insert failed because `actions.intervention_id` was still `NOT NULL`.
+- **Why:** Conversational actions do not always belong to an automated intervention row.
+- **Fix:** Made `intervention_id` nullable and verified the migration actually applied.
+- **Result:** Automated and conversational actions can share the same action ledger safely.
+
+## 17. A successful Payment Link could be missing from channel messages
+
+- **What broke:** Default recovery messages sometimes omitted a valid Razorpay Payment Link.
+- **Why:** The channel query looked for action status `SUCCESS`, but the action service stores `success` in lowercase.
+- **Fix:** Query `status = 'success'` and require `razorpay_api_call = 'payment_links.create'`.
+- **Result:** Only a trusted successful Payment Link action can supply the URL used in recovery messaging.
+
+## 18. A merge silently removed channel tests from the aggregate suite
+
+- **What broke:** CI stayed green even though `test:channels` had disappeared from `test:core` after a merge.
+- **Why:** The aggregate command still succeeded, so the missing test group was easy to miss.
+- **Fix:** Restored `test:channels` and kept all intended test groups in `test:core`.
+- **Result:** Green CI now represents the complete intended core suite.
+
+## 19. The audit trail was append-only only by convention
+
+- **What broke:** Application code only inserted audit rows, but PostgreSQL still allowed normal `UPDATE` and `DELETE` statements.
+- **Why:** There was no database-level protection.
+- **Fix:** Added a PostgreSQL trigger that rejects updates and deletes on `audit_log`.
+- **Result:** The project can accurately describe the audit trail as **database-enforced append-only**.
+
+## 20. Final E2E test was polluted by earlier test data
+
+- **What broke:** A synthetic insufficient-funds E2E case was downgraded to `ambiguous` and escalated.
+- **Why:** The test reused `HDFC`, while many earlier HDFC failures still existed inside the 30-minute correlation window. The verifier correctly interpreted that as possible systemic behavior.
+- **Fix:** The final E2E fixture now uses a unique synthetic bank name per run.
+- **Result:** Test history cannot accidentally change the intended diagnosis, while the production correlation rule stays strict.
+
+## 21. Final E2E verification queried the wrong audit column
+
+- **What broke:** The product reached `RECOVERED`, then the test script failed while reading `audit_log.payload`.
+- **Why:** The real column is named `detail`.
+- **Fix:** Corrected the test query to `audit_log.detail`.
+- **Result:** The final closed-loop E2E completed successfully: signed failure webhook → diagnosis → verifier → plan → policy → recovery action → conversation → signed paid outcome → `RECOVERED` → dashboard `RECOVERED`.
+
+## 22. Synthetic batch timestamps created false bank correlation
+
+- **What broke:** Early synthetic events were inserted too close together, so unrelated failures looked correlated.
+- **Why:** Test timestamps did not model isolated and clustered failures separately.
+- **Fix:** Added explicit timestamp offsets so only intended outage clusters fall inside the 30-minute window.
+- **Result:** The benchmark now tests contextual evidence instead of accidental timestamp collisions.
+
+## 23. Batch reruns accumulated stale diagnoses and interventions
+
+- **What broke:** Repeated troubleshooting created multiple diagnosis rows for the same event and later produced repeated intervention work.
+- **Why:** The batch flow did not clean or skip previously processed rows consistently.
+- **Fix:** Added rerun guards and deterministic batch cleanup where appropriate.
+- **Result:** Re-running evaluation does not multiply the same business work.
+
+## 24. Importing diagnosis code caused an extra model call
+
+- **What broke:** Importing `diagnose()` also ran the file’s CLI `main()` function.
+- **Why:** The executable entry point was not guarded.
+- **Fix:** Added a `require.main === module` check.
+- **Result:** Importing reusable functions no longer produces hidden API calls.
+
+## 25. Smaller environment and tooling issues
+
+- Installed `@types/pg` without the runtime `pg` package → installed `pg`.
+- Left a placeholder PostgreSQL password in early code → moved credentials to `.env`.
+- Used an unsupported international Razorpay test card → switched to the documented Indian test scenario card.
+- Windows console could not display a stored rupee symbol correctly → adjusted client encoding for inspection; data itself was not corrupted.
+- `replaceAll` was outside the repository TypeScript target → replaced with compatible `split(...).join(...)` logic.
+- A test fixture left a pending recovery job that a later smoke test could consume → marked the synthetic job complete during cleanup.
+
+---
+
+The debugging record is intentionally kept because Recovery OS deals with payment-adjacent side effects. The strongest guarantees in the final design—idempotency, trusted outcomes, retry safety, causal evidence, deterministic policy, and durable state—came directly from failures found during testing.

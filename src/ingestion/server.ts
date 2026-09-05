@@ -2,14 +2,15 @@ import "dotenv/config";
 import crypto from "crypto";
 import express, { Request, Response } from "express";
 import { Pool } from "pg";
+import { ensureRecoveryCase, ensureTrack3Schema } from "../recovery/recoveryStore";
 import {
-  ensureRecoveryCase,
-  ensureTrack3Schema,
-  markOriginalPaymentCaptured,
-  markRecoveryFromPaymentLink,
-} from "../recovery/recoveryStore";
+  ensureRecoveryPaymentLinkSchema,
+  markOriginalPaymentCapturedFinancial,
+  markRecoveryFromAnyPaymentLink,
+} from "../recovery/recoveryPaymentLinks";
 import { processPendingRecoveryJobs } from "../recovery/processRecoveryCase";
 import { processDueScheduledActions } from "../execution/scheduledActions";
+import { cancelOutstandingRecoveryPaymentLinks } from "../execution/paymentLinkProvider";
 import { logAuditEvent } from "../ledger/auditLog";
 import { createDashboardRouter } from "../dashboard/dashboardRoutes";
 import { refreshMissingOpenRecoveryPriorities } from "../intelligence/recoveryIntelligence";
@@ -62,27 +63,37 @@ async function processWebhookDelivery(eventId: string): Promise<"processed" | "b
       const paymentLink = body?.payload?.payment_link?.entity;
       if (!paymentLink?.id) throw new Error("Malformed payment_link.paid payload");
       const paidAmount = Number(paymentLink.amount_paid ?? paymentLink.amount ?? 0);
-      const transitioned = await markRecoveryFromPaymentLink(
+      const recovery = await markRecoveryFromAnyPaymentLink(
         pool,
         String(paymentLink.id),
         paidAmount,
         paymentLink.reference_id == null ? null : String(paymentLink.reference_id)
       );
+      let cancelledOtherLinks: Array<{ paymentLinkId: string; outcome: string }> = [];
+      if (recovery.transitioned && recovery.caseId != null) {
+        cancelledOtherLinks = await cancelOutstandingRecoveryPaymentLinks(pool, recovery.caseId, String(paymentLink.id));
+      }
       await logAuditEvent(eventId, "recovery_outcome_webhook", {
         eventType,
         paymentLinkId: paymentLink.id,
         referenceId: paymentLink.reference_id ?? null,
         paidAmount,
-        transitioned,
+        transitioned: recovery.transitioned,
+        recoveryCaseId: recovery.caseId,
+        originalEventId: recovery.originalEventId,
+        cancelledOtherLinks,
       });
     } else if (eventType === "payment.captured") {
       const payment = body?.payload?.payment?.entity;
       if (!payment?.id) throw new Error("Malformed payment.captured payload");
-      const stoppedEvents = await markOriginalPaymentCaptured(pool, String(payment.id));
-      for (const originalEventId of stoppedEvents) {
-        await logAuditEvent(originalEventId, "original_payment_captured_stop", {
+      const stoppedCases = await markOriginalPaymentCapturedFinancial(pool, String(payment.id));
+      for (const stopped of stoppedCases) {
+        const cancelledRecoveryLinks = await cancelOutstandingRecoveryPaymentLinks(pool, stopped.caseId);
+        await logAuditEvent(stopped.originalEventId, "original_payment_captured_stop", {
           capturedWebhookEventId: eventId,
           paymentId: payment.id,
+          caseId: stopped.caseId,
+          cancelledRecoveryLinks,
         });
       }
     }
@@ -124,6 +135,7 @@ async function persistWebhook(eventId: string, eventType: string, body: any): Pr
 
 async function runWorkers(): Promise<void> {
   await ensureTrack3Schema(pool);
+  await ensureRecoveryPaymentLinkSchema(pool);
   await refreshMissingOpenRecoveryPriorities(pool);
   await Promise.all([processPendingRecoveryJobs(), processDueScheduledActions()]);
 }
@@ -178,6 +190,7 @@ app.post(
 
     try {
       await ensureTrack3Schema(pool);
+      await ensureRecoveryPaymentLinkSchema(pool);
       await persistWebhook(eventId, eventType, body);
       const outcome = await processWebhookDelivery(eventId);
       if (outcome === "busy") {

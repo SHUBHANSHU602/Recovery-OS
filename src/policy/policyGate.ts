@@ -1,4 +1,5 @@
 import type { Action } from "./chooseAction";
+import { isPaymentLinkIssuanceAction } from "./chooseAction";
 
 export type ExecutableAction = Action | "stop";
 
@@ -8,7 +9,6 @@ export interface PolicyContext {
   contactsLast24h?: number;
   alreadyRecovered?: boolean;
   optedOut?: boolean;
-  // Backward-compatible inputs for the existing isolated policy tests.
   customerFailureCount?: number;
   customerContactedInLast24h?: boolean;
 }
@@ -44,13 +44,10 @@ export function applyPolicyGate(context: PolicyContext): PolicyOutcome {
     };
   }
 
-  if (
-    (context.chosenAction === "retry_now" || context.chosenAction === "retry_with_backoff") &&
-    automatedRetryCount >= POLICY_LIMITS.maxAutomatedRetries
-  ) {
+  if (isPaymentLinkIssuanceAction(context.chosenAction) && automatedRetryCount >= POLICY_LIMITS.maxAutomatedRetries) {
     return {
       result: "BLOCKED_ESCALATED",
-      reason: `Recovery case already has ${automatedRetryCount} automated retry attempts; maximum is ${POLICY_LIMITS.maxAutomatedRetries}. Escalating instead of executing again.`,
+      reason: `Recovery case already has ${automatedRetryCount} automated recovery-link attempts; maximum is ${POLICY_LIMITS.maxAutomatedRetries}. Escalating instead of issuing another link.`,
       finalAction: "escalate_to_human",
     };
   }

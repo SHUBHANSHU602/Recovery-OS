@@ -28,16 +28,9 @@ const ROOT_CAUSE_PRIOR: Record<string, number> = {
 
 const PRIOR_WEIGHT = 4;
 
-function clampProbability(value: number): number {
-  return Math.max(0.05, Math.min(0.95, value));
-}
-
+function clampProbability(value: number): number { return Math.max(0.05, Math.min(0.95, value)); }
 function zonedHour(date: Date, timeZone: string): number {
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    hour: "2-digit",
-    hourCycle: "h23",
-  });
+  const formatter = new Intl.DateTimeFormat("en-US", { timeZone, hour: "2-digit", hourCycle: "h23" });
   return Number(formatter.format(date));
 }
 
@@ -50,12 +43,7 @@ export function isQuietHours(date: Date, config: ContactWindowConfig = DEFAULT_C
 
 export function nextAllowedContactTime(date: Date, config: ContactWindowConfig = DEFAULT_CONTACT_WINDOW): Date {
   if (!isQuietHours(date, config)) return new Date(date);
-
-  const candidate = new Date(date);
-  candidate.setSeconds(0, 0);
-  candidate.setMinutes(candidate.getMinutes() + 1);
-
-  // A valid daily contact window must appear within 24h. Keep a little headroom for DST zones.
+  const candidate = new Date(date); candidate.setSeconds(0, 0); candidate.setMinutes(candidate.getMinutes() + 1);
   for (let minute = 0; minute < 36 * 60; minute += 1) {
     if (!isQuietHours(candidate, config)) return candidate;
     candidate.setMinutes(candidate.getMinutes() + 1);
@@ -67,11 +55,7 @@ export function causeAwareInitialDelaySeconds(rootCause: string | null | undefin
   return CAUSE_AWARE_INITIAL_DELAY_SECONDS[rootCause ?? ""] ?? 5 * 60;
 }
 
-export function estimateRecoveryProbability(input: {
-  rootCause: string | null | undefined;
-  historicalCases: number;
-  historicalRecoveries: number;
-}): number {
+export function estimateRecoveryProbability(input: { rootCause: string | null | undefined; historicalCases: number; historicalRecoveries: number }): number {
   const prior = ROOT_CAUSE_PRIOR[input.rootCause ?? ""] ?? 0.3;
   const cases = Math.max(0, Math.floor(input.historicalCases));
   const recoveries = Math.max(0, Math.min(cases, Math.floor(input.historicalRecoveries)));
@@ -88,18 +72,10 @@ export async function refreshRecoveryPriority(
   strategyOverride?: string | null
 ): Promise<{ recoveryProbability: number; expectedRecoveryValue: number; rootCause: string | null; strategy: string | null }> {
   const current = await pool.query(
-    `SELECT rc.amount_at_risk, rc.strategy,
-            d.root_cause
+    `SELECT rc.amount_at_risk, rc.strategy, d.root_cause
      FROM recovery_cases rc
-     LEFT JOIN LATERAL (
-       SELECT root_cause
-       FROM diagnoses
-       WHERE event_id = rc.original_event_id
-       ORDER BY id DESC
-       LIMIT 1
-     ) d ON true
-     WHERE rc.id = $1`,
-    [caseId]
+     LEFT JOIN LATERAL (SELECT root_cause FROM diagnoses WHERE event_id = rc.original_event_id ORDER BY id DESC LIMIT 1) d ON true
+     WHERE rc.id = $1`, [caseId]
   );
   if (current.rows.length === 0) throw new Error(`Recovery case ${caseId} does not exist`);
 
@@ -109,14 +85,13 @@ export async function refreshRecoveryPriority(
 
   const history = await pool.query(
     `WITH latest_diagnosis AS (
-       SELECT DISTINCT ON (event_id) event_id, root_cause
-       FROM diagnoses
-       ORDER BY event_id, id DESC
+       SELECT DISTINCT ON (event_id) event_id, root_cause FROM diagnoses ORDER BY event_id, id DESC
      )
      SELECT
        COUNT(*) AS cases,
        COUNT(*) FILTER (
-         WHERE rc.status = 'RECOVERED'
+         WHERE rc.financial_status = 'RECOVERED'
+           AND rc.status = 'RECOVERED'
            AND rc.recovered_amount > 0
            AND rc.recovered_at IS NOT NULL
            AND rc.razorpay_payment_link_id IS NOT NULL
@@ -127,7 +102,7 @@ export async function refreshRecoveryPriority(
      WHERE rc.id <> $1
        AND d.root_cause IS NOT DISTINCT FROM $2::text
        AND ($3::text IS NULL OR rc.strategy = $3)
-       AND rc.status IN ('RECOVERED', 'STOPPED', 'ESCALATED')`,
+       AND rc.financial_status IN ('RECOVERED', 'STOPPED')`,
     [caseId, rootCause, strategy]
   );
 
@@ -140,14 +115,9 @@ export async function refreshRecoveryPriority(
 
   await pool.query(
     `UPDATE recovery_cases
-     SET recovery_probability = $2,
-         expected_recovery_value = $3,
-         priority_updated_at = now(),
-         updated_at = now()
-     WHERE id = $1`,
-    [caseId, recoveryProbability, expectedValue]
+     SET recovery_probability = $2, expected_recovery_value = $3, priority_updated_at = now(), updated_at = now()
+     WHERE id = $1`, [caseId, recoveryProbability, expectedValue]
   );
-
   return { recoveryProbability, expectedRecoveryValue: expectedValue, rootCause, strategy };
 }
 
@@ -155,20 +125,11 @@ export async function refreshMissingOpenRecoveryPriorities(pool: Pool, limit = 1
   const result = await pool.query(
     `SELECT id, strategy
      FROM recovery_cases
-     WHERE status NOT IN ('RECOVERED', 'STOPPED', 'ESCALATED')
+     WHERE financial_status = 'OPEN'
        AND (recovery_probability IS NULL OR expected_recovery_value IS NULL)
      ORDER BY updated_at ASC
-     LIMIT $1`,
-    [Math.min(500, Math.max(1, limit))]
+     LIMIT $1`, [Math.min(500, Math.max(1, limit))]
   );
-
-  for (const row of result.rows) {
-    await refreshRecoveryPriority(
-      pool,
-      Number(row.id),
-      row.strategy == null ? null : String(row.strategy)
-    );
-  }
-
+  for (const row of result.rows) await refreshRecoveryPriority(pool, Number(row.id), row.strategy == null ? null : String(row.strategy));
   return result.rows.length;
 }

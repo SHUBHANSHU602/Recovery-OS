@@ -1,20 +1,20 @@
 import { applyPolicyGate } from "./policyGate";
 
-console.log("=== Test 1: LLM wants retry_now, but customer already failed 4 times (over the cap of 3) ===");
+console.log("=== Test 1: planner wants issue_recovery_payment_link, but recovery-link attempt cap is exceeded ===");
 console.log(applyPolicyGate({
-  chosenAction: "retry_now",
+  chosenAction: "issue_recovery_payment_link",
   customerFailureCount: 4,
   customerContactedInLast24h: false,
 }));
 
-console.log("\n=== Test 2: LLM wants retry_now, customer has failed only once -- should be approved ===");
+console.log("\n=== Test 2: planner wants issue_recovery_payment_link with capacity remaining -- should be approved ===");
 console.log(applyPolicyGate({
-  chosenAction: "retry_now",
+  chosenAction: "issue_recovery_payment_link",
   customerFailureCount: 1,
   customerContactedInLast24h: false,
 }));
 
-console.log("\n=== Test 3: LLM wants whatsapp_nudge, but customer was already contacted today ===");
+console.log("\n=== Test 3: planner wants whatsapp_nudge, but customer was already contacted today ===");
 console.log(applyPolicyGate({
   chosenAction: "whatsapp_nudge",
   customerFailureCount: 0,

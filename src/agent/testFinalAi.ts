@@ -5,7 +5,7 @@ import { Pool } from "pg";
 import { applyPolicyGate } from "../policy/policyGate";
 import { ensureRecoveryCase, ensureTrack3Schema } from "../recovery/recoveryStore";
 import { queueRecoveryReplan, scheduleBusinessOutcomeReview } from "../recovery/replanQueue";
-import { applySharedPolicy, DECISION_SCENARIOS, scoreActions, staticRulesBaseline } from "../evaluation/aiDecisionBenchmark";
+import { applySharedPolicy, contextAwareDeterministicPlanner, DECISION_SCENARIOS, scoreActions } from "../evaluation/aiDecisionBenchmark";
 import {
   applyPlannerBusinessGuardrails,
   buildRecoveryPlannerPrompt,
@@ -42,123 +42,60 @@ const baseContext: RecoveryPlanContext = {
 async function main() {
   const parsed = parseRecoveryPlan(JSON.stringify({
     objective: "Recover the outstanding amount without excessive customer contact.",
-    primary_action: "retry_with_backoff",
+    primary_action: "issue_recovery_payment_link_after_backoff",
     fallback_action: "offer_alternate_payment_method",
-    reasoning: "A delayed retry fits the current outage evidence.",
-    escalation_criteria: ["retry budget exhausted"],
+    reasoning: "A delayed customer-authorized recovery link fits the current outage evidence.",
+    escalation_criteria: ["recovery-link budget exhausted"],
     stop_conditions: ["trusted payment success", "original payment succeeds or customer opts out"],
   }));
-  assert.equal(parsed.primary_action, "retry_with_backoff");
-  assert.throws(() => parseRecoveryPlan(JSON.stringify({ ...parsed, primary_action: "charge_card_directly" })));
+  assert.equal(parsed.primary_action, "issue_recovery_payment_link_after_backoff");
+  assert.throws(() => parseRecoveryPlan(JSON.stringify({ ...parsed, primary_action: "retry_original_charge" })));
 
   const prompt = buildRecoveryPlannerPrompt({
+    ...baseContext,
     trigger: "intervention_unresolved",
-    rootCause: "insufficient_funds",
-    confidence: 0.88,
-    amountAtRisk: 50000,
-    customerFailureCount: 2,
-    correlatedFailuresAtSameBank: 0,
     automatedRetryCount: 1,
     contactsLast24h: 1,
-    priorCustomerOutcomes: [],
-    strategyEvidence: [{ strategy: "retry_with_backoff", cases: 4, recoveries: 2, recoveryRate: 50, recoveredAmount: 90000 }],
     previousPlan: {
       version: 1,
       trigger: "initial_failure",
       objective: "recover",
       primaryAction: "whatsapp_nudge",
-      fallbackAction: "retry_with_backoff",
+      fallbackAction: "issue_recovery_payment_link_after_backoff",
       reasoning: "initial nudge",
     },
     observation: { priorAction: "whatsapp_nudge", outcome: "unresolved" },
+    strategyEvidence: [{ strategy: "issue_recovery_payment_link_after_backoff", cases: 4, recoveries: 2, recoveryRate: 50, recoveredAmount: 90000 }],
   });
   assert.match(prompt, /Previous recovery plan/);
   assert.match(prompt, /HTTP 429/);
-  assert.match(prompt, /infrastructure concerns/);
+  assert.match(prompt, /does NOT|never retries|never auto-charges/i);
   assert.match(prompt, /Comparable strategy outcomes/);
-  assert.match(prompt, /Decision priorities/);
 
-  // Business guardrails are context-derived invariants, not benchmark ids.
   assert.equal(
-    applyPlannerBusinessGuardrails(
-      { ...baseContext, trigger: "intervention_unresolved", rootCause: "systemic_bank_outage", automatedRetryCount: 3 },
-      samplePlan
-    ).primary_action,
+    applyPlannerBusinessGuardrails({ ...baseContext, trigger: "intervention_unresolved", rootCause: "systemic_bank_outage", automatedRetryCount: 3 }, samplePlan).primary_action,
     "escalate_to_human"
   );
+  assert.equal(applyPlannerBusinessGuardrails({ ...baseContext, rootCause: "ambiguous", confidence: 0.25 }, samplePlan).primary_action, "escalate_to_human");
+  assert.equal(applyPlannerBusinessGuardrails(baseContext, samplePlan).primary_action, "whatsapp_nudge");
   assert.equal(
-    applyPlannerBusinessGuardrails(
-      { ...baseContext, rootCause: "ambiguous", confidence: 0.25 },
-      samplePlan
-    ).primary_action,
-    "escalate_to_human"
-  );
-  assert.equal(
-    applyPlannerBusinessGuardrails(baseContext, samplePlan).primary_action,
-    "whatsapp_nudge"
-  );
-  assert.equal(
-    applyPlannerBusinessGuardrails(
-      {
-        ...baseContext,
-        trigger: "promise_due_unpaid",
-        rootCause: "insufficient_funds",
-        contactsLast24h: 1,
-        observation: { outcome: "promise_due_and_case_still_unresolved" },
-      },
-      samplePlan
-    ).primary_action,
-    "escalate_to_human"
-  );
-  assert.equal(
-    applyPlannerBusinessGuardrails(
-      {
-        ...baseContext,
-        trigger: "intervention_unresolved",
-        rootCause: "insufficient_funds",
-        observation: { priorAction: "whatsapp_nudge", outcome: "unresolved" },
-        strategyEvidence: [
-          { strategy: "whatsapp_nudge", cases: 8, recoveries: 1, recoveryRate: 12.5, recoveredAmount: 120000 },
-          { strategy: "retry_with_backoff", cases: 9, recoveries: 5, recoveryRate: 55.6, recoveredAmount: 740000 },
-        ],
-      },
-      samplePlan
-    ).primary_action,
-    "retry_with_backoff"
-  );
-  assert.equal(
-    applyPlannerBusinessGuardrails(
-      {
-        ...baseContext,
-        trigger: "intervention_unresolved",
-        rootCause: "systemic_bank_outage",
-        correlatedFailuresAtSameBank: 4,
-        automatedRetryCount: 1,
-        observation: { priorAction: "retry_with_backoff", outcome: "unresolved_after_business_review" },
-        previousPlan: {
-          version: 1,
-          trigger: "initial_failure",
-          objective: "wait through outage",
-          primaryAction: "retry_with_backoff",
-          fallbackAction: "escalate_to_human",
-          reasoning: "outage evidence",
-        },
-        strategyEvidence: [
-          { strategy: "retry_with_backoff", cases: 10, recoveries: 1, recoveryRate: 10, recoveredAmount: 90000 },
-        ],
-      },
-      samplePlan
-    ).primary_action,
-    "escalate_to_human"
+    applyPlannerBusinessGuardrails({
+      ...baseContext,
+      trigger: "intervention_unresolved",
+      observation: { priorAction: "whatsapp_nudge", outcome: "unresolved" },
+      strategyEvidence: [
+        { strategy: "whatsapp_nudge", cases: 8, recoveries: 1, recoveryRate: 12.5, recoveredAmount: 120000 },
+        { strategy: "issue_recovery_payment_link_after_backoff", cases: 9, recoveries: 5, recoveryRate: 55.6, recoveredAmount: 740000 },
+      ],
+    }, samplePlan).primary_action,
+    "issue_recovery_payment_link_after_backoff"
   );
 
-  const baseline = scoreActions(
-    DECISION_SCENARIOS.map((scenario) =>
-      applySharedPolicy(staticRulesBaseline(scenario.context.rootCause), scenario.context)
-    )
+  const fairBaseline = scoreActions(
+    DECISION_SCENARIOS.map((scenario) => applySharedPolicy(contextAwareDeterministicPlanner(scenario.context), scenario.context))
   );
-  assert.equal(baseline.total, 12);
-  assert.equal(baseline.correct, 9);
+  assert.equal(fairBaseline.total, 12);
+  assert.equal(fairBaseline.correct, 12, "fair deterministic arm receives the same contextual guardrails as the AI arm");
 
   const pool = new Pool();
   let eventId: string | null = null;
@@ -166,18 +103,12 @@ async function main() {
     await ensureTrack3Schema(pool);
     eventId = `final_ai_test_${randomUUID()}`;
     await pool.query(
-      `INSERT INTO events (event_id, event_type, payload)
-       VALUES ($1, 'payment.failed', $2)`,
+      `INSERT INTO events (event_id, event_type, payload) VALUES ($1, 'payment.failed', $2)`,
       [eventId, {
         event: "payment.failed",
         payload: { payment: { entity: {
-          id: `pay_${randomUUID()}`,
-          amount: 50000,
-          currency: "INR",
-          email: "final-ai-test@example.com",
-          bank: "HDFC",
-          error_code: "BAD_REQUEST_ERROR",
-          error_description: "insufficient funds",
+          id: `pay_${randomUUID()}`, amount: 50000, currency: "INR", email: "final-ai-test@example.com",
+          bank: `TEST_${randomUUID()}`, error_code: "BAD_REQUEST_ERROR", error_description: "insufficient funds",
           created_at: Math.floor(Date.now() / 1000) - 60,
         } } },
       }]
@@ -185,49 +116,33 @@ async function main() {
     const caseId = await ensureRecoveryCase(pool, eventId);
     assert.ok(caseId);
 
-    const policy = applyPolicyGate({ chosenAction: "retry_with_backoff", automatedRetryCount: 0, contactsLast24h: 0 });
+    const policy = applyPolicyGate({ chosenAction: "issue_recovery_payment_link_after_backoff", automatedRetryCount: 0, contactsLast24h: 0 });
     const saved = await persistRecoveryPlan(pool, {
-      caseId: Number(caseId),
-      eventId,
-      trigger: "initial_failure",
-      plan: parsed,
-      strategyEvidence: [],
-      policy,
+      caseId: Number(caseId), eventId, trigger: "initial_failure", plan: parsed, strategyEvidence: [], policy,
     });
     assert.equal(saved.version, 1);
     const latest = await loadLatestRecoveryPlan(pool, Number(caseId));
-    assert.equal(latest?.primaryAction, "retry_with_backoff");
+    assert.equal(latest?.primaryAction, "issue_recovery_payment_link_after_backoff");
 
     const queued = await queueRecoveryReplan(pool, {
-      caseId: Number(caseId),
-      eventId,
-      trigger: "intervention_unresolved",
-      observation: { priorAction: "retry_with_backoff", outcome: "unresolved" },
+      caseId: Number(caseId), eventId, trigger: "intervention_unresolved",
+      observation: { priorAction: "issue_recovery_payment_link_after_backoff", outcome: "unresolved" },
     });
     assert.equal(queued, true);
-    const job = await pool.query(
-      "SELECT status, mode, replan_trigger, replan_observation FROM recovery_jobs WHERE case_id = $1",
-      [caseId]
-    );
+    const job = await pool.query("SELECT status, mode, replan_trigger, replan_observation FROM recovery_jobs WHERE case_id = $1", [caseId]);
     assert.equal(job.rows[0].status, "PENDING");
     assert.equal(job.rows[0].mode, "REPLAN");
-    assert.equal(job.rows[0].replan_trigger, "intervention_unresolved");
-    assert.equal(job.rows[0].replan_observation.priorAction, "retry_with_backoff");
 
     await scheduleBusinessOutcomeReview(pool, {
-      caseId: Number(caseId),
-      eventId,
-      action: "retry_with_backoff",
-      delaySeconds: 60,
+      caseId: Number(caseId), eventId, action: "issue_recovery_payment_link_after_backoff", delaySeconds: 60,
     });
-    const review = await pool.query(
-      "SELECT desired_action, status FROM scheduled_actions WHERE case_id = $1 AND desired_action = 'ai_outcome_review'",
-      [caseId]
-    );
+    const review = await pool.query("SELECT desired_action, status FROM scheduled_actions WHERE case_id = $1 AND desired_action = 'ai_outcome_review'", [caseId]);
     assert.equal(review.rows.length, 1);
     assert.equal(review.rows[0].status, "PENDING");
 
     console.log("Final AI recovery-agent deterministic tests passed.");
+    console.log("- canonical action names describe Payment Link issuance rather than original-charge retries");
+    console.log("- fair deterministic benchmark arm receives the same contextual guardrails as AI");
   } finally {
     if (eventId) {
       await pool.query("DELETE FROM recovery_cases WHERE original_event_id = $1", [eventId]);

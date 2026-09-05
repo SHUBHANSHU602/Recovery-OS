@@ -97,15 +97,7 @@ export async function registerRecoveryPaymentLink(
            amount_paid = GREATEST(recovery_payment_links.amount_paid, EXCLUDED.amount_paid),
            updated_at = now()
      RETURNING *`,
-    [
-      input.caseId,
-      input.paymentLinkId,
-      input.actionId,
-      input.shortUrl ?? null,
-      input.providerStatus ?? null,
-      input.amount ?? null,
-      input.amountPaid ?? 0,
-    ]
+    [input.caseId, input.paymentLinkId, input.actionId, input.shortUrl ?? null, input.providerStatus ?? null, input.amount ?? null, input.amountPaid ?? 0]
   );
   return mapLink(result.rows[0]);
 }
@@ -117,15 +109,7 @@ export async function updateRecoveryPaymentLinkProviderState(
   amountPaid = 0
 ): Promise<void> {
   await ensureRecoveryPaymentLinkSchema(pool);
-  const localStatus: RecoveryPaymentLinkStatus | null =
-    providerStatus === "paid"
-      ? "PAID"
-      : providerStatus === "cancelled"
-        ? "CANCELLED"
-        : providerStatus === "expired"
-          ? "EXPIRED"
-          : null;
-
+  const localStatus: RecoveryPaymentLinkStatus | null = providerStatus === "paid" ? "PAID" : providerStatus === "cancelled" ? "CANCELLED" : providerStatus === "expired" ? "EXPIRED" : null;
   await pool.query(
     `UPDATE recovery_payment_links
      SET provider_status = $2,
@@ -152,8 +136,7 @@ export async function markRecoveryFromAnyPaymentLink(
   const resolved = await pool.query(
     `SELECT rc.id, rc.original_event_id, rc.financial_status
      FROM recovery_cases rc
-     LEFT JOIN recovery_payment_links rpl
-       ON rpl.case_id = rc.id AND rpl.payment_link_id = $1
+     LEFT JOIN recovery_payment_links rpl ON rpl.case_id = rc.id AND rpl.payment_link_id = $1
      WHERE rpl.payment_link_id = $1
         OR rc.razorpay_payment_link_id = $1
         OR ($2::bigint IS NOT NULL AND rc.id = $2)
@@ -161,10 +144,7 @@ export async function markRecoveryFromAnyPaymentLink(
      LIMIT 1`,
     [paymentLinkId, referencedCaseId]
   );
-
-  if (resolved.rows.length === 0) {
-    return { transitioned: false, caseId: null, originalEventId: null };
-  }
+  if (resolved.rows.length === 0) return { transitioned: false, caseId: null, originalEventId: null };
 
   const caseId = Number(resolved.rows[0].id);
   const originalEventId = String(resolved.rows[0].original_event_id);
@@ -173,58 +153,29 @@ export async function markRecoveryFromAnyPaymentLink(
     `INSERT INTO recovery_payment_links (case_id, payment_link_id, status, provider_status, amount_paid, paid_at)
      VALUES ($1, $2, 'PAID', 'paid', $3, now())
      ON CONFLICT (payment_link_id) DO UPDATE
-       SET status = 'PAID',
-           provider_status = 'paid',
+       SET status = 'PAID', provider_status = 'paid',
            amount_paid = GREATEST(recovery_payment_links.amount_paid, EXCLUDED.amount_paid),
-           paid_at = COALESCE(recovery_payment_links.paid_at, now()),
-           updated_at = now()`,
+           paid_at = COALESCE(recovery_payment_links.paid_at, now()), updated_at = now()`,
     [caseId, paymentLinkId, Math.max(0, paidAmount)]
   );
 
   const result = await pool.query(
     `UPDATE recovery_cases
-     SET status = 'RECOVERED',
-         financial_status = 'RECOVERED',
-         automation_status = 'STOPPED',
+     SET status = 'RECOVERED', financial_status = 'RECOVERED', automation_status = 'STOPPED',
          recovered_amount = LEAST(amount_at_risk, GREATEST(recovered_amount, $2)),
-         recovered_at = COALESCE(recovered_at, now()),
-         terminal_reason = 'trusted_payment_link_paid',
-         razorpay_payment_link_id = $1,
-         updated_at = now()
-     WHERE id = $3
-       AND financial_status = 'OPEN'
-       AND status <> 'STOPPED'
+         recovered_at = COALESCE(recovered_at, now()), terminal_reason = 'trusted_payment_link_paid',
+         razorpay_payment_link_id = $1, updated_at = now()
+     WHERE id = $3 AND financial_status = 'OPEN'
      RETURNING id`,
     [paymentLinkId, Math.max(0, paidAmount), caseId]
   );
 
   if (result.rows.length === 1) {
-    await pool.query(
-      `UPDATE recovery_payment_links
-       SET status = 'SUPERSEDED', updated_at = now()
-       WHERE case_id = $1 AND payment_link_id <> $2 AND status = 'ACTIVE'`,
-      [caseId, paymentLinkId]
-    );
-    await pool.query(
-      `UPDATE payment_promises
-       SET status = 'FULFILLED', fulfilled_at = COALESCE(fulfilled_at, now()), updated_at = now()
-       WHERE case_id = $1 AND status = 'PENDING'`,
-      [caseId]
-    );
-    await pool.query(
-      `UPDATE scheduled_actions
-       SET status = 'CANCELLED', updated_at = now()
-       WHERE case_id = $1 AND status = 'PENDING'`,
-      [caseId]
-    );
-    await pool.query(
-      `UPDATE human_escalations
-       SET status = 'RESOLVED', resolved_at = COALESCE(resolved_at, now()), updated_at = now()
-       WHERE case_id = $1 AND status = 'OPEN'`,
-      [caseId]
-    );
+    await pool.query(`UPDATE recovery_payment_links SET status = 'SUPERSEDED', updated_at = now() WHERE case_id = $1 AND payment_link_id <> $2 AND status = 'ACTIVE'`, [caseId, paymentLinkId]);
+    await pool.query(`UPDATE payment_promises SET status = 'FULFILLED', fulfilled_at = COALESCE(fulfilled_at, now()), updated_at = now() WHERE case_id = $1 AND status = 'PENDING'`, [caseId]);
+    await pool.query(`UPDATE scheduled_actions SET status = 'CANCELLED', updated_at = now() WHERE case_id = $1 AND status = 'PENDING'`, [caseId]);
+    await pool.query(`UPDATE human_escalations SET status = 'RESOLVED', resolved_at = COALESCE(resolved_at, now()), updated_at = now() WHERE case_id = $1 AND status = 'OPEN'`, [caseId]);
   }
-
   return { transitioned: result.rows.length === 1, caseId, originalEventId };
 }
 
@@ -235,45 +186,18 @@ export async function markOriginalPaymentCapturedFinancial(
   await ensureRecoveryPaymentLinkSchema(pool);
   const result = await pool.query(
     `UPDATE recovery_cases
-     SET status = 'STOPPED',
-         financial_status = 'STOPPED',
-         automation_status = 'STOPPED',
-         terminal_reason = 'original_payment_captured',
-         updated_at = now()
-     WHERE original_payment_id = $1
-       AND financial_status = 'OPEN'
-       AND status <> 'RECOVERED'
+     SET status = 'STOPPED', financial_status = 'STOPPED', automation_status = 'STOPPED',
+         terminal_reason = 'original_payment_captured', updated_at = now()
+     WHERE original_payment_id = $1 AND financial_status = 'OPEN' AND status <> 'RECOVERED'
      RETURNING id, original_event_id`,
     [paymentId]
   );
-
   for (const row of result.rows) {
     const caseId = Number(row.id);
-    await pool.query(
-      `UPDATE recovery_payment_links
-       SET status = 'SUPERSEDED', updated_at = now()
-       WHERE case_id = $1 AND status = 'ACTIVE'`,
-      [caseId]
-    );
-    await pool.query(
-      `UPDATE payment_promises
-       SET status = 'CANCELLED', cancelled_at = COALESCE(cancelled_at, now()), updated_at = now()
-       WHERE case_id = $1 AND status = 'PENDING'`,
-      [caseId]
-    );
-    await pool.query(
-      `UPDATE scheduled_actions
-       SET status = 'CANCELLED', updated_at = now()
-       WHERE case_id = $1 AND status = 'PENDING'`,
-      [caseId]
-    );
-    await pool.query(
-      `UPDATE human_escalations
-       SET status = 'RESOLVED', resolved_at = COALESCE(resolved_at, now()), updated_at = now()
-       WHERE case_id = $1 AND status = 'OPEN'`,
-      [caseId]
-    );
+    await pool.query(`UPDATE recovery_payment_links SET status = 'SUPERSEDED', updated_at = now() WHERE case_id = $1 AND status = 'ACTIVE'`, [caseId]);
+    await pool.query(`UPDATE payment_promises SET status = 'CANCELLED', cancelled_at = COALESCE(cancelled_at, now()), updated_at = now() WHERE case_id = $1 AND status = 'PENDING'`, [caseId]);
+    await pool.query(`UPDATE scheduled_actions SET status = 'CANCELLED', updated_at = now() WHERE case_id = $1 AND status = 'PENDING'`, [caseId]);
+    await pool.query(`UPDATE human_escalations SET status = 'RESOLVED', resolved_at = COALESCE(resolved_at, now()), updated_at = now() WHERE case_id = $1 AND status = 'OPEN'`, [caseId]);
   }
-
   return result.rows.map((row) => ({ caseId: Number(row.id), originalEventId: String(row.original_event_id) }));
 }

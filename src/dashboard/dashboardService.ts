@@ -25,6 +25,8 @@ function normalizeCaseRow(row: any) {
     priorityUpdatedAt: row.priority_updated_at ?? null,
     strategy: row.strategy == null ? null : String(row.strategy),
     status: String(row.status),
+    financialStatus: row.financial_status == null ? null : String(row.financial_status),
+    automationStatus: row.automation_status == null ? null : String(row.automation_status),
     terminalReason: row.terminal_reason == null ? null : String(row.terminal_reason),
     razorpayPaymentLinkId: row.razorpay_payment_link_id == null ? null : String(row.razorpay_payment_link_id),
     recoveredAt: row.recovered_at ?? null,
@@ -141,42 +143,58 @@ export async function getDashboardSummary(pool: Pool) {
     SELECT
       COUNT(*) AS total_cases,
       COALESCE(SUM(amount_at_risk), 0) AS revenue_at_risk,
-      COALESCE(SUM(expected_recovery_value) FILTER (WHERE status NOT IN ('RECOVERED', 'STOPPED', 'ESCALATED')), 0) AS expected_recovery_value,
-      COALESCE(SUM(
-        CASE WHEN ${TRUSTED_RECOVERY_SQL}
-          THEN LEAST(amount_at_risk, recovered_amount)
-          ELSE 0
-        END
-      ), 0) AS confirmed_recovered,
+      COALESCE(SUM(expected_recovery_value) FILTER (WHERE financial_status = 'OPEN'), 0) AS expected_recovery_value,
+      COALESCE(SUM(CASE WHEN ${TRUSTED_RECOVERY_SQL} THEN LEAST(amount_at_risk, recovered_amount) ELSE 0 END), 0) AS confirmed_recovered,
       COUNT(*) FILTER (WHERE ${TRUSTED_RECOVERY_SQL}) AS recovered_cases,
-      COUNT(*) FILTER (WHERE status = 'ESCALATED') AS escalated_cases,
-      COUNT(*) FILTER (WHERE status = 'WAITING_FOR_OUTCOME') AS waiting_cases,
-      COUNT(*) FILTER (WHERE status = 'SCHEDULED') AS scheduled_cases,
-      COUNT(*) FILTER (WHERE status NOT IN ('RECOVERED', 'STOPPED', 'ESCALATED')) AS open_cases,
+      COUNT(*) FILTER (WHERE automation_status = 'ESCALATED') AS escalated_cases,
+      COUNT(*) FILTER (WHERE automation_status = 'WAITING') AS waiting_cases,
+      COUNT(*) FILTER (WHERE automation_status = 'SCHEDULED') AS scheduled_cases,
+      COUNT(*) FILTER (WHERE financial_status = 'OPEN') AS open_cases,
+      COUNT(*) FILTER (WHERE financial_status = 'STOPPED') AS stopped_cases,
       COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM payment_promises pp WHERE pp.case_id = recovery_cases.id AND pp.status = 'PENDING')) AS active_promises
     FROM recovery_cases
   `);
 
+  const executionMetrics = await pool.query(`
+    SELECT
+      COUNT(*) FILTER (WHERE status = 'success') AS successful_actions,
+      COUNT(*) FILTER (WHERE razorpay_api_call = 'payment_links.create' AND status = 'success') AS payment_links_created
+    FROM actions
+  `);
+  const contactMetrics = await pool.query(`SELECT COUNT(*) AS contacts FROM outbound_contacts`);
+  const linkMetrics = await pool.query(`
+    SELECT
+      COUNT(*) AS tracked_links,
+      COUNT(*) FILTER (WHERE status = 'ACTIVE') AS active_links,
+      COUNT(*) FILTER (WHERE status = 'PAID') AS paid_links,
+      COUNT(*) FILTER (WHERE status IN ('CANCELLED','EXPIRED','SUPERSEDED')) AS inactive_links
+    FROM recovery_payment_links
+  `);
+
   const statusResult = await pool.query(`
-    SELECT status, COUNT(*) AS count
+    SELECT financial_status, automation_status, COUNT(*) AS count
     FROM recovery_cases
-    GROUP BY status
-    ORDER BY count DESC, status ASC
+    GROUP BY financial_status, automation_status
+    ORDER BY count DESC, financial_status, automation_status
   `);
 
   const strategyResult = await pool.query(`
     SELECT
-      COALESCE(strategy, 'unassigned') AS strategy,
+      COALESCE(rc.strategy, 'unassigned') AS strategy,
       COUNT(*) AS cases,
       COUNT(*) FILTER (WHERE ${TRUSTED_RECOVERY_SQL}) AS recovered_cases,
-      COALESCE(SUM(
-        CASE WHEN ${TRUSTED_RECOVERY_SQL}
-          THEN LEAST(amount_at_risk, recovered_amount)
-          ELSE 0
-        END
-      ), 0) AS recovered_amount
-    FROM recovery_cases
-    GROUP BY COALESCE(strategy, 'unassigned')
+      COALESCE(SUM(CASE WHEN ${TRUSTED_RECOVERY_SQL} THEN LEAST(rc.amount_at_risk, rc.recovered_amount) ELSE 0 END), 0) AS recovered_amount,
+      COALESCE(AVG(COALESCE(a.attempts, 0)), 0) AS average_attempts
+    FROM recovery_cases rc
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*)::numeric AS attempts
+      FROM actions act
+      LEFT JOIN interventions i ON i.id = act.intervention_id
+      LEFT JOIN diagnoses d ON d.id = i.diagnosis_id
+      WHERE d.event_id = rc.original_event_id
+         OR starts_with(act.idempotency_key, rc.original_event_id || '_')
+    ) a ON true
+    GROUP BY COALESCE(rc.strategy, 'unassigned')
     ORDER BY cases DESC, strategy ASC
   `);
 
@@ -199,23 +217,21 @@ export async function getDashboardSummary(pool: Pool) {
       FROM diagnoses
       ORDER BY event_id, id DESC
     ), labeled AS (
-      SELECT DISTINCT ON (rb.event_id)
-        rb.event_id,
-        rb.ground_truth_cause,
-        ld.root_cause
+      SELECT DISTINCT ON (rb.event_id) rb.event_id, rb.ground_truth_cause, ld.root_cause
       FROM recovery_batches rb
       JOIN latest_diagnosis ld ON ld.event_id = rb.event_id
       ORDER BY rb.event_id, rb.id DESC
     )
-    SELECT
-      COUNT(*) AS total,
-      COUNT(*) FILTER (WHERE root_cause = ground_truth_cause) AS correct
+    SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE root_cause = ground_truth_cause) AS correct
     FROM labeled
   `);
 
   const recentResult = await pool.query(`${CASE_SELECT} ORDER BY COALESCE(rc.expected_recovery_value, 0) DESC, rc.updated_at DESC LIMIT 6`);
 
   const row = metrics.rows[0] ?? {};
+  const execution = executionMetrics.rows[0] ?? {};
+  const contacts = contactMetrics.rows[0] ?? {};
+  const links = linkMetrics.rows[0] ?? {};
   const atRisk = asNumber(row.revenue_at_risk);
   const recovered = asNumber(row.confirmed_recovered);
   const labeledTotal = asNumber(accuracyResult.rows[0]?.total);
@@ -230,19 +246,33 @@ export async function getDashboardSummary(pool: Pool) {
     valueRecoveryRate: atRisk > 0 ? (recovered / atRisk) * 100 : 0,
     recoveredCases: asNumber(row.recovered_cases),
     openCases: asNumber(row.open_cases),
+    stoppedCases: asNumber(row.stopped_cases),
     waitingCases: asNumber(row.waiting_cases),
     scheduledCases: asNumber(row.scheduled_cases),
     escalatedCases: asNumber(row.escalated_cases),
     activePromises: asNumber(row.active_promises),
+    successfulActions: asNumber(execution.successful_actions),
+    contactsSent: asNumber(contacts.contacts),
+    paymentLinksCreated: asNumber(execution.payment_links_created),
+    trackedPaymentLinks: asNumber(links.tracked_links),
+    activePaymentLinks: asNumber(links.active_links),
+    paidPaymentLinks: asNumber(links.paid_links),
+    inactivePaymentLinks: asNumber(links.inactive_links),
     diagnosisAccuracy: labeledTotal > 0 ? (labeledCorrect / labeledTotal) * 100 : null,
     diagnosisCorrect: labeledCorrect,
     diagnosisTotal: labeledTotal,
-    statuses: statusResult.rows.map((item) => ({ status: String(item.status), count: asNumber(item.count) })),
+    states: statusResult.rows.map((item) => ({
+      financialStatus: String(item.financial_status),
+      automationStatus: String(item.automation_status),
+      count: asNumber(item.count),
+    })),
     strategies: strategyResult.rows.map((item) => ({
       strategy: String(item.strategy),
       cases: asNumber(item.cases),
       recoveredCases: asNumber(item.recovered_cases),
+      recoveryRate: asNumber(item.cases) > 0 ? (asNumber(item.recovered_cases) / asNumber(item.cases)) * 100 : 0,
       recoveredAmount: asNumber(item.recovered_amount),
+      averageAttempts: Number(item.average_attempts ?? 0),
     })),
     rootCauses: rootCauseResult.rows.map((item) => ({ rootCause: String(item.root_cause), count: asNumber(item.count) })),
     recentCases: recentResult.rows.map(normalizeCaseRow),
@@ -257,28 +287,15 @@ export async function listRecoveryCases(
   const search = options.search?.trim() || null;
   const limit = Math.min(100, Math.max(1, options.limit ?? 50));
   const offset = Math.max(0, options.offset ?? 0);
-
   const where = `
-    WHERE ($1::text IS NULL OR rc.status = $1)
-      AND (
-        $2::text IS NULL
-        OR rc.customer_email ILIKE '%' || $2 || '%'
-        OR rc.original_event_id ILIKE '%' || $2 || '%'
-        OR COALESCE(rc.original_payment_id, '') ILIKE '%' || $2 || '%'
-      )
+    WHERE ($1::text IS NULL OR rc.status = $1 OR rc.financial_status = $1 OR rc.automation_status = $1)
+      AND ($2::text IS NULL OR rc.customer_email ILIKE '%' || $2 || '%' OR rc.original_event_id ILIKE '%' || $2 || '%' OR COALESCE(rc.original_payment_id, '') ILIKE '%' || $2 || '%')
   `;
-
   const [rowsResult, countResult] = await Promise.all([
     pool.query(`${CASE_SELECT} ${where} ORDER BY COALESCE(rc.expected_recovery_value, 0) DESC, rc.updated_at DESC LIMIT $3 OFFSET $4`, [status, search, limit, offset]),
     pool.query(`SELECT COUNT(*) FROM recovery_cases rc ${where}`, [status, search]),
   ]);
-
-  return {
-    total: asNumber(countResult.rows[0]?.count),
-    limit,
-    offset,
-    cases: rowsResult.rows.map(normalizeCaseRow),
-  };
+  return { total: asNumber(countResult.rows[0]?.count), limit, offset, cases: rowsResult.rows.map(normalizeCaseRow) };
 }
 
 export async function getRecoveryCase(pool: Pool, caseId: number) {
@@ -286,82 +303,66 @@ export async function getRecoveryCase(pool: Pool, caseId: number) {
   return result.rows.length === 0 ? null : normalizeCaseRow(result.rows[0]);
 }
 
+export async function listRecoveryPaymentLinks(pool: Pool, caseId: number) {
+  const result = await pool.query(
+    `SELECT id, case_id, payment_link_id, action_id, short_url, status, provider_status,
+            amount, amount_paid, paid_at, cancelled_at, created_at, updated_at
+     FROM recovery_payment_links
+     WHERE case_id = $1
+     ORDER BY created_at DESC, id DESC`,
+    [caseId]
+  );
+  return {
+    caseId,
+    items: result.rows.map((row) => ({
+      id: asNumber(row.id),
+      paymentLinkId: String(row.payment_link_id),
+      actionId: row.action_id == null ? null : asNumber(row.action_id),
+      shortUrl: row.short_url == null ? null : String(row.short_url),
+      status: String(row.status),
+      providerStatus: row.provider_status == null ? null : String(row.provider_status),
+      amount: row.amount == null ? null : asNumber(row.amount),
+      amountPaid: asNumber(row.amount_paid),
+      paidAt: row.paid_at ?? null,
+      cancelledAt: row.cancelled_at ?? null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      current: String(row.status) === 'ACTIVE',
+    })),
+  };
+}
+
 export async function getRecoveryCaseTimeline(pool: Pool, caseId: number) {
   const caseResult = await pool.query("SELECT original_event_id FROM recovery_cases WHERE id = $1", [caseId]);
   if (caseResult.rows.length === 0) return null;
-
   const eventId = String(caseResult.rows[0].original_event_id);
-  const result = await pool.query(
-    `SELECT id, stage, detail, created_at
-     FROM audit_log
-     WHERE event_id = $1
-     ORDER BY created_at ASC, id ASC`,
-    [eventId]
-  );
-
-  return {
-    caseId,
-    eventId,
-    events: result.rows.map((row) => ({
-      id: asNumber(row.id),
-      stage: String(row.stage),
-      detail: row.detail,
-      createdAt: row.created_at,
-    })),
-  };
+  const result = await pool.query(`SELECT id, stage, detail, created_at FROM audit_log WHERE event_id = $1 ORDER BY created_at ASC, id ASC`, [eventId]);
+  return { caseId, eventId, events: result.rows.map((row) => ({ id: asNumber(row.id), stage: String(row.stage), detail: row.detail, createdAt: row.created_at })) };
 }
 
 export async function listHumanEscalations(pool: Pool, limit = 100) {
   const boundedLimit = Math.min(200, Math.max(1, limit));
   const result = await pool.query(
-    `SELECT
-       he.id,
-       he.case_id,
-       he.reason,
-       he.status,
-       he.created_at,
-       he.updated_at,
-       he.resolved_at,
-       rc.customer_email,
-       rc.amount_at_risk,
-       rc.expected_recovery_value,
-       rc.strategy,
-       rc.status AS recovery_status,
-       d.root_cause,
-       d.confidence
+    `SELECT he.id, he.case_id, he.reason, he.status, he.created_at, he.updated_at, he.resolved_at,
+            rc.customer_email, rc.amount_at_risk, rc.expected_recovery_value, rc.strategy,
+            rc.status AS recovery_status, rc.financial_status, rc.automation_status,
+            d.root_cause, d.confidence
      FROM human_escalations he
      JOIN recovery_cases rc ON rc.id = he.case_id
      LEFT JOIN LATERAL (
-       SELECT root_cause, confidence
-       FROM diagnoses
-       WHERE event_id = rc.original_event_id
-       ORDER BY id DESC
-       LIMIT 1
+       SELECT root_cause, confidence FROM diagnoses WHERE event_id = rc.original_event_id ORDER BY id DESC LIMIT 1
      ) d ON true
-     ORDER BY
-       CASE he.status WHEN 'OPEN' THEN 0 ELSE 1 END,
-       COALESCE(rc.expected_recovery_value, 0) DESC,
-       he.updated_at DESC
+     ORDER BY CASE he.status WHEN 'OPEN' THEN 0 ELSE 1 END, COALESCE(rc.expected_recovery_value, 0) DESC, he.updated_at DESC
      LIMIT $1`,
     [boundedLimit]
   );
-
-  return {
-    items: result.rows.map((row) => ({
-      id: asNumber(row.id),
-      caseId: asNumber(row.case_id),
-      customerEmail: row.customer_email == null ? null : String(row.customer_email),
-      amountAtRisk: asNumber(row.amount_at_risk),
-      expectedRecoveryValue: row.expected_recovery_value == null ? null : asNumber(row.expected_recovery_value),
-      strategy: row.strategy == null ? null : String(row.strategy),
-      recoveryStatus: String(row.recovery_status),
-      reason: String(row.reason),
-      status: String(row.status),
-      rootCause: row.root_cause == null ? null : String(row.root_cause),
-      confidence: row.confidence == null ? null : Number(row.confidence),
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      resolvedAt: row.resolved_at ?? null,
-    })),
-  };
+  return { items: result.rows.map((row) => ({
+    id: asNumber(row.id), caseId: asNumber(row.case_id),
+    customerEmail: row.customer_email == null ? null : String(row.customer_email),
+    amountAtRisk: asNumber(row.amount_at_risk), expectedRecoveryValue: row.expected_recovery_value == null ? null : asNumber(row.expected_recovery_value),
+    strategy: row.strategy == null ? null : String(row.strategy), recoveryStatus: String(row.recovery_status),
+    financialStatus: String(row.financial_status), automationStatus: String(row.automation_status),
+    reason: String(row.reason), status: String(row.status), rootCause: row.root_cause == null ? null : String(row.root_cause),
+    confidence: row.confidence == null ? null : Number(row.confidence), createdAt: row.created_at, updatedAt: row.updated_at, resolvedAt: row.resolved_at ?? null,
+  })) };
 }

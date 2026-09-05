@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Recovery OS — Recovery Console</title>
+  <link rel="stylesheet" href="/ui.css" />
+</head>
+<body class="app-page">
+  <aside class="app-nav">
+    <a class="brand" href="/"><span class="brand-mark">R</span><span>Recovery OS</span></a>
+    <button class="side-link active" data-view="overview">Overview</button>
+    <button class="side-link" data-view="recoveries">Recovery Proof</button>
+    <button class="side-link" data-view="cases">Cases</button>
+    <button class="side-link" data-view="activity">Live Pipeline</button>
+    <button class="side-link" data-view="channels">Channels</button>
+    <button class="side-link" data-view="escalations">Human Queue</button>
+    <div class="app-nav-foot"><a href="/">← Landing page</a><span id="backend-status">Connecting…</span></div>
+  </aside>
+
+  <main class="app-main">
+    <header class="app-topbar">
+      <div><span class="kicker">Merchant recovery console</span><h1 id="view-title">Recovery Overview</h1></div>
+      <div class="top-actions"><span id="last-sync">Waiting for sync…</span><button id="refresh" class="button ghost small">Refresh</button></div>
+    </header>
+
+    <section id="overview" class="app-view active">
+      <div class="metric-grid" id="metrics"></div>
+      <div class="dashboard-grid">
+        <section class="panel recovered-panel"><div class="panel-head"><div><span class="kicker">Trusted outcomes</span><h2>Money recovered</h2></div><button class="link-button" data-jump="recoveries">View proof →</button></div><div class="recovered-total" id="recovered-total">₹—</div><p>Counted only after the paid-outcome contract is satisfied.</p><div id="recovery-preview"></div></section>
+        <section class="panel"><div class="panel-head"><div><span class="kicker">Recovery intelligence</span><h2>Failure causes</h2></div></div><div id="cause-bars" class="bar-list"></div></section>
+      </div>
+      <section class="panel"><div class="panel-head"><div><span class="kicker">Live portfolio</span><h2>Cases worth watching</h2></div><button class="link-button" data-jump="cases">Open all cases →</button></div><div id="case-preview" class="table-wrap"></div></section>
+    </section>
+
+    <section id="recoveries" class="app-view">
+      <div class="proof-banner"><div><span class="kicker">Strict recovery contract</span><h2>Every row here reached a trusted paid outcome.</h2><p>Visible only when status is RECOVERED, recovered amount is positive, recovery time exists, a Payment Link ID is present, and terminal reason is <code>trusted_payment_link_paid</code>.</p></div><div><strong id="proof-total">₹—</strong><span>trusted recovery ledger</span></div></div>
+      <section class="panel"><div class="panel-head"><div><span class="kicker">Recovery ledger</span><h2>Recovered transactions</h2></div></div><div id="recovery-table" class="table-wrap"></div></section>
+    </section>
+
+    <section id="cases" class="app-view">
+      <section class="panel"><div class="panel-head responsive"><div><span class="kicker">Operations</span><h2>Recovery cases</h2></div><div class="filters"><input id="case-search" placeholder="Search customer, payment or event" /><select id="case-status"><option value="">All states</option><option>WAITING_FOR_OUTCOME</option><option>SCHEDULED</option><option>RECOVERED</option><option>STOPPED</option><option>ESCALATED</option></select></div></div><div id="cases-table" class="table-wrap"></div></section>
+    </section>
+
+    <section id="activity" class="app-view"><section class="panel"><div class="panel-head"><div><span class="kicker">Append-only audit stream</span><h2>Live recovery pipeline</h2></div></div><div id="activity-stream" class="timeline"></div></section></section>
+
+    <section id="channels" class="app-view">
+      <div id="channel-status" class="channel-grid"></div>
+      <section class="panel"><div class="panel-head"><div><span class="kicker">Delivery history</span><h2>Recovery channels</h2></div></div><div id="channel-table" class="table-wrap"></div></section>
+    </section>
+
+    <section id="escalations" class="app-view"><section class="panel"><div class="panel-head"><div><span class="kicker">Human in the loop</span><h2>Cases requiring review</h2></div></div><div id="escalation-list" class="card-list"></div></section></section>
+  </main>
+
+  <div id="drawer" class="drawer" aria-hidden="true"><div class="drawer-backdrop" data-close></div><aside class="drawer-sheet"><div class="drawer-top"><div><span class="kicker">Recovery case</span><h2 id="drawer-title">Case</h2></div><button data-close class="close-button">×</button></div><div id="drawer-body"></div></aside></div>
+  <div id="toast" class="toast"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

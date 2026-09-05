@@ -34,10 +34,7 @@ These are results that were actually exercised during local release validation:
 | Database append-only audit guard | **UPDATE/DELETE blocked** |
 
 The ₹703.51 result came from a Razorpay **Test Mode Payment Link** that reached the trusted paid-outcome path and moved its recovery case to `RECOVERED`. The provider reconciliation test then checked all 10 provider-created Test Mode links against Razorpay's current state: the paid link matched trusted recovered accounting, all 9 unpaid links remained excluded from recovered revenue, and the run completed with **0 mismatches**. The 12-scenario AI comparison measures contextual decision quality, not revenue lift.
-
-> 📸 **SCREENSHOT PLACEHOLDER — replace this line with the terminal screenshot showing `PROVIDER RECONCILIATION RESULT: PASS`.**
-
-For deeper engineering context: [`DEBUG.md`](./DEBUG.md) records the important bugs, root causes, fixes, and validation results; [`DECISION.md`](./DECISION.md) explains the architecture, technology choices, and trade-offs.
+<img width="626" height="425" alt="image" src="https://github.com/user-attachments/assets/e2903318-aa6b-4310-a5b0-a09f301c096a" />
 
 ---
 
@@ -286,3 +283,6 @@ SUBMISSION_EVIDENCE.md concise submission-facing validation summary
 Recovery OS is designed around a strict boundary:
 
 > **Let AI reason where the problem is ambiguous. Keep trust, safety, side effects, retries, idempotency, and recovered-money accounting deterministic.**
+> ---
+> For deeper engineering context: [`DEBUG.md`](./DEBUG.md) records the important bugs, root causes, fixes, and validation results; [`DECISION.md`](./DECISION.md) explains the architecture, technology choices, and trade-offs.
+

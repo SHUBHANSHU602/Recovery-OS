@@ -1,266 +1,264 @@
-### ALL THE IMPORTANT DECISIONS ARE STORED HERE
----
+# Recovery OS — Engineering Decisions
 
-- All amounts stored/handled in paise (Razorpay's native unit); convert to rupees only at display time.
-- ts-node failed to resolve entry file on Windows/Node 24 (MODULE_NOT_FOUND on a valid path); tsx hit a separate ESM resolution error on the same setup; switched Day-1 webhook receiver to plain CommonJS JS to unblock, deferred TypeScript to Day 4 when structured-output validation actually needs it.
-- Expected error_code to reflect the specific test-card scenario (payment_timed_out); got generic BAD_REQUEST_ERROR/payment_failed instead — test-mode manual Failure click doesn't preserve the card's intended error type.
+This file contains only the important architecture and engineering decisions behind Recovery OS.
 
-# Decisions Log
+## Core design philosophy
 
-## Day 1
-- LLM provider: Anthropic Claude — matches Razorpay's own stack (Agent Studio built on Claude Agent SDK, NPCI agentic-payments pilot runs on Claude).
-- Language/runtime: Node.js — I/O-bound service (webhooks, DB, LLM calls) fits Node's async model; TypeScript deferred to Day 4.
-- TypeScript deferred for Day 1: ts-node and tsx both hit unresolved Windows/Node-24 module resolution errors on this machine. Day 1's webhook receiver is trivial and doesn't need type safety yet — switched to plain CommonJS JS to stay unblocked.
-- Orchestration: plain hand-rolled pipeline, not LangGraph — the loop is linear with one branch (escalation); a framework built for complex multi-agent graphs is unnecessary complexity here.
-- Memory/retrieval: no vector DB — diagnosis works off structured evidence (error codes, correlated failures, payment history), which is a SQL problem, not semantic search.
-- Deployment: Docker Compose, local — buildathon asks for a public repo + pitch video + architecture doc, not confirmed live hosting.
+- **AI handles ambiguity; deterministic code handles trust.**
+  - The model diagnoses failure causes, creates recovery plans, and handles customer language.
+  - Deterministic code verifies evidence, enforces policy, controls side effects, manages idempotency, and records money outcomes.
+  - Why: a payment system should not allow an LLM to directly decide trusted identity, payment amount, retry limits, or recovered revenue.
 
-## Day 2
-- TypeScript brought in early for the DB layer; switched from ts-node to tsx.
-- Schema: `events` uses a surrogate internal primary key plus a separate UNIQUE external `event_id`.
-- Dedup enforced at the database level, not with a check-then-insert race.
-- Raw webhook payloads stored as JSONB to preserve source data while requirements evolve.
-- DB credentials moved to `.env` before public-repo use.
+- **Recovery is a business outcome, not an API result.**
+  - A successful Payment Link API call is only execution success.
+  - A case becomes `RECOVERED` only after a trusted `payment_link.paid` outcome is processed.
+  - Why: creating a link or sending a message does not mean money was actually recovered.
 
-## Day 3
-- Evidence per event: error code/description, customer failure history count, and same-bank correlated failures in a 30-minute window.
-- Synthetic labeled batch created so diagnosis accuracy is measurable.
-- `recovery_batches.event_id` references `events(event_id)` so labels cannot orphan from source events.
+- **Fail closed when state is uncertain.**
+  - Ambiguous diagnoses, exhausted retry budgets, uncertain crash recovery, or unsafe customer-contact state move toward human review instead of more automation.
+  - Why: payment-adjacent automation should prefer safety over duplicated or unjustified actions.
 
-## Day 4
-- LLM provider switched from Anthropic to Gemini due practical API access constraints at that stage; architecture remains provider-independent.
-- Diagnosis structured output enforced through tool/function calling.
-- Core functions exported and reused rather than duplicated across batch/single-event flows.
-- Batch calls rate-limited deliberately rather than hiding provider free-tier constraints.
+## Tech stack decisions
 
-## Day 5
-- Verifier is deterministic, zero-API logic. It checks evidence consistency, not semantic confidence calibration.
-- Stored diagnosis is the verifier's final cause, making the verifier load-bearing rather than decorative.
-- A known boundary was recorded: a claim can be evidence-consistent yet still be a poor confident guess on genuinely thin evidence.
+- **Node.js + TypeScript**
+  - Used for webhook ingestion, API routes, background workers, AI calls, and provider integrations.
+  - Why: Recovery OS is mostly I/O-bound and benefits from Node’s async model, while TypeScript gives explicit contracts around payment, policy, and recovery state.
 
-## Day 6
-- Action selection constrained to five approved actions via function calling.
-- Policy gate remains deterministic and can override the model regardless of confidence.
-- Interventions store both model choice and post-policy final action.
+- **Express**
+  - Used for Razorpay webhooks, dashboard APIs, live merchant-console APIs, channel APIs, and local testing controls.
+  - Why: the service needs a small, transparent HTTP layer rather than a large framework.
 
-## Day 7
-- Added `actions` and `audit_log` as durable side-effect/audit records.
-- Centralized audit writes through one helper.
-- Idempotency enforced with a database UNIQUE key before external execution.
+- **PostgreSQL**
+  - Stores payment events, recovery cases, jobs, diagnoses, plans, actions, retries, conversations, promises, channel deliveries, escalations, and audit history.
+  - Why: the problem is highly relational and transactional. Recovery state, idempotency, joins, locks, and durable queues fit PostgreSQL better than a document-only design.
 
-## Day 8
-- Conversations persist full message history as JSONB.
-- Conversational agent uses a tool-calling loop, not a one-shot response.
-- Known customer identity/amount are backend context, not values the LLM is allowed to redefine.
-- `actions.intervention_id` made nullable because conversational actions may not belong to one automated intervention row.
+- **Groq + `openai/gpt-oss-120b`**
+  - Used for structured diagnosis, contextual recovery planning, replanning, and conversational reasoning.
+  - Why: the project needs tool/function calling and strong reasoning, but the architecture keeps model output bounded by deterministic verification and policy.
 
-## Day 9
-- `whatsapp_nudge` and `offer_alternate_payment_method` enter the conversational path.
-- Opening message remains deterministic; language reasoning begins on actual customer replies.
-- Evaluation reads stored state rather than only work performed in the current process invocation.
+- **Razorpay Test Mode**
+  - Used for Payment Link execution and trusted payment outcome handling during development and validation.
+  - Why: it exercises real payment-provider integration behavior without production money movement.
 
-## Day 10
-- Expanded evaluation data to broaden cause coverage and include multiple bank clusters + repeat customers.
-- Metrics initially included diagnosis accuracy, verifier interventions, action-initiation recovery proxy, and false escalation.
+- **Resend + Twilio adapters**
+  - Resend handles email when configured.
+  - Twilio handles SMS, WhatsApp, and voice when configured.
+  - Why: channel delivery should use dedicated provider adapters while sharing one recovery-policy boundary.
 
-## Track 3 P0 hardening — 2026-09-02
-- **Correctness baseline:** AI proposes; deterministic code verifies, gates, authorizes, executes, and accounts for money-adjacent actions.
-- Added `recovery_cases` as the business-outcome identity keyed by original failed event.
-- Action/API success no longer equals recovery. Trusted `payment_link.paid` is required to record recovered money.
-- Added durable `recovery_jobs` so the webhook can hand off to a restartable pipeline.
-- Webhook trust boundary moved to raw-body HMAC-SHA256 validation before parsing/persistence.
-- Evidence is decision-time bounded; future events may not influence earlier decisions.
-- Policy inputs come from persisted state instead of hard-coded placeholders.
-- All payment-link creation uses one `ActionService` and reloads trusted amount/customer identity from the original event.
-- Action rows are claimed before Razorpay calls to close the concurrent SELECT-before-call race.
-- Conversational payment-link tools use the same ActionService and policy boundary.
-- Opening recovery text is `assistant`/outbound; `user` is reserved for actual customer input.
-- Evaluation separates execution reliability from confirmed money recovery.
-- At P0 completion, delayed retry scheduling, 429 handling, DB-level audit protection, durable escalation work items, and reproducibility were intentionally left for P1 rather than overstated.
+- **Plain orchestration instead of LangGraph**
+  - Recovery flow is implemented with explicit services, state tables, and workers.
+  - Why: the workflow is understandable and auditable without introducing a graph framework for orchestration that is already well represented by durable state transitions.
 
-## Track 3 P1 hardening — 2026-09-02
+- **No vector database / RAG**
+  - Recovery decisions use structured payment evidence from PostgreSQL.
+  - Why: error codes, payment history, bank correlation, retries, contacts, and outcomes are structured data, not semantic-document retrieval problems.
 
-### Webhook inbox semantics
-- **Decision:** treat webhook transport receipt and business processing as separate states.
-- Added `webhook_deliveries` with `RECEIVED`, `PROCESSING`, `PROCESSED`, and `FAILED`.
-- A duplicate Razorpay event ID is only considered fully done when its delivery state is `PROCESSED`; failed or stale work may be reclaimed.
-- Rationale: deduplicating at receipt time is insufficient because downstream processing can fail after persistence.
+## Webhook and trust-boundary decisions
 
-### PostgreSQL transactions must use one checked-out client
-- **Decision:** any multi-statement transaction uses `pool.connect()` and a dedicated client for BEGIN/COMMIT/ROLLBACK.
-- Rationale: `pool.query()` calls may use different physical connections, so transaction boundaries cannot safely be expressed with independent pool-level calls.
+- **Verify webhook signatures before trusting payloads.**
+  - Raw request bodies are checked with HMAC-SHA256 and `timingSafeEqual`.
+  - Why: event IDs alone do not prove that a webhook came from the trusted payment provider.
 
-### Idempotency belongs to a logical attempt
-- **Decision:** key payment-link side effects by recovery event + action + logical attempt number, not only by action name.
-- Example: `event_retry_with_backoff_attempt_1`, `...attempt_2`, `...attempt_3`.
-- Rationale: action-level identity blocked legitimate later retries; row-ID identity allowed duplicates. Attempt identity preserves both dedupe and retry semantics.
+- **Separate webhook receipt from webhook completion.**
+  - `webhook_deliveries` tracks `RECEIVED`, `PROCESSING`, `PROCESSED`, and `FAILED`.
+  - Why: a webhook can be persisted successfully while later processing fails; retries must be able to resume that work.
 
-### Fail closed on ambiguous crash recovery
-- **Decision:** if an exact action-attempt key already exists after a worker crash, do not blindly repeat the external side effect.
-- Instead, surface the state as ambiguous and create a human escalation.
-- Rationale: without a confirmed provider-side exactly-once primitive for this call, replaying an uncertain money-adjacent external action is less safe than escalating.
+- **Use one checked-out PostgreSQL client for transactions.**
+  - `pool.connect()` owns each multi-step transaction.
+  - Why: separate `pool.query()` calls are not guaranteed to run on the same connection.
 
-### Backoff must be persisted, not slept in-process
-- **Decision:** `retry_with_backoff` creates `scheduled_actions` with `run_at` and is consumed by a polling worker.
-- Rationale: in-memory timers/sleeps disappear on restart and hold execution resources unnecessarily.
-- Transient retry policy: honor `Retry-After` when supplied; otherwise bounded exponential backoff + deterministic jitter; retry 429, 5xx, and network-style failures; cap automated attempts at three.
+## Recovery-state decisions
 
-### Original payment success is terminal but not “recovered by Recovery OS”
-- **Decision:** trusted `payment.captured` for the original payment moves an open recovery case to `STOPPED`, not `RECOVERED`.
-- Rationale: the customer has paid and outreach must stop, but attributing that money to a Recovery OS Payment Link would overclaim recovered revenue.
+- **One durable recovery case per original failed payment.**
+  - `recovery_cases` is the main business object for status, amount at risk, strategy, provider link, terminal reason, and recovered amount.
+  - Why: diagnosis/action rows can change over time, but the original failed payment needs one stable business identity.
 
-### Action selection gets contextual inputs; policy still owns limits
-- **Decision:** action selection receives root cause, confidence, amount at risk, prior customer failures, same-bank evidence, current retry/contact state, and prior recovery outcomes.
-- Rationale: a root-cause → action mapping was too close to a switch statement and did not justify an LLM.
-- The deterministic policy gate remains authoritative and can reject the LLM recommendation.
+- **Use durable recovery jobs rather than processing everything inside the webhook request.**
+  - A trusted failed-payment webhook creates a recovery job.
+  - Why: the recovery pipeline should survive restarts and not depend on one HTTP request staying alive.
 
-### Evaluation labels are causal, not omniscient
-- **Decision:** early observations in an emerging bank cluster are labeled `ambiguous` until enough *earlier* corroborating failures exist.
-- Added same-error-text cases where only contextual history changes the expected diagnosis.
-- Rationale: ground truth for a decision system must reflect what was knowable at decision time, not what became obvious later.
+- **Treat the original payment succeeding as terminal.**
+  - Trusted `payment.captured` moves the case to `STOPPED`, not `RECOVERED`.
+  - Why: recovery must stop immediately, but that money should not be attributed to a Recovery OS Payment Link.
 
-### Evaluation metrics invalidate stale headlines when the methodology changes
-- **Decision:** remove old 96% / 67.6% README headlines after changing causal labels and recovered-money accounting.
-- New numbers must come from rerunning the current evaluator on the current schema/data.
-- Rationale: preserving old numbers after changing the definition would be misleading.
+## Evidence and diagnosis decisions
 
-### Human escalation is a work item, not just a log line
-- **Decision:** create `human_escalations` with one durable item per recovery case.
-- Policy, scheduler, executor, and agent escalation paths all converge on this record.
-- Rationale: an escalation that nobody can own/resolve is not an operational workflow.
+- **Evidence is bounded by event time.**
+  - Customer history and same-bank correlation only include failures that happened before the current event.
+  - Why: future information must not leak into earlier decisions.
 
-### Audit log terminology and enforcement
-- **Decision:** describe the audit trail as **database-enforced append-only**, not cryptographically immutable.
-- Added a PostgreSQL trigger rejecting UPDATE and DELETE on `audit_log`.
-- Rationale: this materially strengthens tamper resistance while keeping the wording precise; DB admins can still alter schema/disable triggers, so “immutable ledger” remains too strong.
+- **Diagnosis is constrained to a small allowed cause set.**
+  - `insufficient_funds`
+  - `expired_card`
+  - `systemic_bank_outage`
+  - `ambiguous`
+  - Why: a bounded schema makes model behavior testable and keeps downstream policy predictable.
 
-### Repository structure and reproducibility
-- **Decision:** flatten the application to the repository root and use standard `README.md`.
-- Remove tracked `node_modules`; retain `.gitignore` protections.
-- Restore a valid `package.json` and Node-oriented `tsconfig.json`.
-- Add `.env.example`, `docker-compose.yml`, ordered SQL migrations, and `src/db/migrate.ts`.
-- Rationale: a judge should be able to clone, install, start Postgres, migrate, type-check, and run without reconstructing hidden local state.
+- **A deterministic verifier runs after the model.**
+  - It checks whether the diagnosis is consistent with observable evidence.
+  - Why: the model’s confidence is not enough to authorize automated recovery.
 
-### Runtime verification claims
-- **Decision:** do not claim P1 runtime/E2E success from the GitHub connector session.
-- Static cross-file review and repository mutations are verified; local Postgres, Razorpay Test Mode, and Groq execution still need to be run in the user's environment.
-- The repository now exposes explicit commands for that verification so results can be recorded after execution rather than inferred.
+## Recovery-planner decisions
 
-## Phase B — Recovery intelligence layer — 2026-09-04
+- **Use a structured, versioned recovery plan instead of a one-shot action guess.**
+  - Every plan contains an objective, primary action, fallback action, reasoning, escalation criteria, and stop conditions.
+  - Why: recovery is a multi-step business process, and plan history should be visible and auditable.
 
-### Expected recovery value is operational priority, not recovered revenue
-- **Decision:** compute and persist a smoothed recovery probability plus `expected_recovery_value = amount_at_risk × probability` for prioritization.
-- Historical provider-confirmed outcomes may influence the probability, but expected value is never added to recovered revenue.
-- Rationale: merchants need to know which open cases deserve attention first without weakening the strict `payment_link.paid` accounting rule.
+- **Allowed automated actions are bounded.**
+  - `retry_now`
+  - `retry_with_backoff`
+  - `offer_alternate_payment_method`
+  - `whatsapp_nudge`
+  - `escalate_to_human`
+  - Why: the AI should reason inside an approved action surface instead of inventing side effects.
 
-### Initial retry timing should reflect the diagnosed failure class
-- **Decision:** the first durable `retry_with_backoff` schedule is root-cause aware; later transport/provider failures continue to use `Retry-After` or bounded execution backoff.
-- Rationale: a bank outage, insufficient funds, and an expired card should not all be treated as the same timing problem.
+- **Deterministic business guardrails sit after AI planning.**
+  - Examples: exhausted retries escalate, low-confidence ambiguity escalates, Promise-to-Pay contact rules are enforced, and failed prior strategies can trigger a change in approach.
+  - Why: AI can choose strategy, but stable business invariants should not depend on model wording.
 
-### Quiet hours defer outreach instead of silently dropping it
-- **Decision:** outbound recovery contacts are checked against a deterministic merchant timezone/contact window. During quiet hours, the intended contact becomes durable scheduled work for the next allowed window.
-- Rationale: contact compliance belongs in deterministic execution policy, not in an LLM prompt or an in-memory timer.
+- **Planner inference uses temperature `0`.**
+  - Why: recovery decisions should be reproducible and benchmarkable instead of changing randomly between equivalent runs.
 
-### Promise-to-Pay is a durable recovery commitment
-- **Decision:** customer payment promises are persisted with amount, due time, source, status, and an associated reminder job.
-- Only one pending promise is active per recovery case; a replacement cancels the previous pending promise and its still-pending reminder before scheduling the replacement reminder.
-- A trusted recovery outcome fulfills the pending promise and cancels remaining scheduled work for that case.
-- Rationale: "I will pay later" is not a chat message to forget; it is a financial workflow state that must survive restarts and stop once payment is confirmed.
+- **Replanning is triggered by business outcomes, not infrastructure errors.**
+  - Unresolved interventions, customer replies, or overdue Promise-to-Pay commitments can cause replanning.
+  - 429/5xx/network failures stay in deterministic execution retry logic.
+  - Why: transport reliability and customer/payment intent are different problems.
 
-### Conversational Promise-to-Pay requires an explicit customer commitment
-- **Decision:** the conversational agent may call `record_promise_to_pay` only when the customer explicitly commits to paying a specific amount by a specific future time; vague intent is not persisted as a financial commitment.
-- Trusted case identity and outstanding amount remain backend-owned, and the promise service caps the requested amount to the outstanding balance.
-- Rationale: an LLM may interpret language, but it must not manufacture a financial promise or redefine trusted monetary state.
+- **Historical outcomes are decision context, not model retraining.**
+  - The planner can see SQL-aggregated strategy outcomes and prior customer recovery results.
+  - Why: useful memory can improve context without claiming continuous learning or online model training.
 
-### Payment-link outcome correlation fails closed when a link is already known
-- **Decision:** `reference_id = recovery_case_<id>` is used only as a fallback correlation mechanism when the recovery case does not already have a stored Razorpay Payment Link ID. Once a link ID is persisted, a paid outcome must match that provider link.
-- Rationale: a valid case reference alone should not allow a different payment link to satisfy an already-bound recovery case.
+## Policy decisions
 
-### Phase boundaries remain explicit
-- **Decision:** Phase B records/defer-schedules outbound contacts but does not pretend WhatsApp/SMS/email/voice are live provider integrations.
-- Real channel delivery belongs to Phase C and will use the same policy and scheduling boundaries.
+- **The policy gate is authoritative.**
+  - It enforces automated retry caps, customer contact caps, terminal-state rules, and safe escalation behavior.
+  - Why: business safety rules must remain deterministic even when the AI recommendation changes.
 
-## Phase C — Omnichannel recovery — 2026-09-05
+- **Policy reads live persisted state.**
+  - Retry count, recent contacts, terminal state, and other constraints come from PostgreSQL.
+  - Why: hard-coded counters or prompt-only limits are not trustworthy in a restartable system.
 
-### Channels share one recovery boundary
-- **Decision:** email, SMS, WhatsApp and voice use one channel service instead of separate feature-specific side-effect paths.
-- Every send reloads trusted recovery-case/customer data, rejects terminal cases, enforces quiet hours, and atomically reserves the customer-wide 24-hour contact slot before provider execution.
-- Rationale: adding more channels must not create four new ways to bypass recovery policy, and concurrent requests must not both pass a check-before-send race.
+## Side-effect and idempotency decisions
 
-### Provider availability is explicit, never implied
-- **Decision:** email uses Resend when configured; SMS, WhatsApp and voice use Twilio when configured. Missing credentials produce an explicitly `SIMULATED` delivery rather than pretending a provider send occurred.
-- Rationale: demo breadth is useful only if provider claims remain honest and machine-visible.
+- **All money-adjacent side effects pass through one ActionService.**
+  - Automated and conversational Payment Link requests use the same execution boundary.
+  - Why: there should be one place to enforce trusted data reload, policy, idempotency, provider calls, and durable result recording.
 
-### Channel delivery is not revenue recovery
-- **Decision:** `channel_deliveries` records communication attempts only. No accepted message, SMS, WhatsApp send, email, or voice call changes `recovery_cases.recovered_amount` or `RECOVERED` state.
-- Rationale: the existing trusted Razorpay paid-outcome contract remains the only source of recovered revenue.
+- **Idempotency belongs to the logical action attempt.**
+  - Keys include stable failed-payment identity, action, and attempt number.
+  - Why: database row IDs change on reruns, while action-only identity is too broad for legitimate later retries.
 
-### Recovery messages only surface trusted successful Payment Links
-- **Decision:** the channel service looks up only `actions` rows where `razorpay_api_call = 'payment_links.create'` and `status = 'success'` before placing a short URL in an outbound message.
-- Rationale: the previous merged query used the wrong status casing and could omit a valid link; filtering by action type also avoids accidentally selecting an unrelated later successful action.
+- **Claim the action before the provider call.**
+  - PostgreSQL `INSERT ... ON CONFLICT DO NOTHING` reserves the logical attempt before Razorpay execution.
+  - Why: check-then-call idempotency is vulnerable to concurrent duplicate requests.
 
-## Phase D — Competitive evaluation — 2026-09-05
+- **Do not blindly replay an ambiguous claimed external action after a crash.**
+  - Create human escalation instead.
+  - Why: PostgreSQL and an external API cannot provide one atomic exactly-once transaction together.
 
-### Offline benchmark and provider-confirmed revenue are separate evidence classes
-- **Decision:** the 500-case treatment/control benchmark is explicitly synthetic and counterfactual. Its simulated outcomes never write to `recovery_cases` and never contribute to provider-confirmed recovered revenue.
-- Rationale: a larger benchmark improves experimental comparability without weakening the strict Razorpay paid-outcome accounting rule.
+## Retry and scheduling decisions
 
-### Reproducibility beats random headline generation
-- **Decision:** benchmark scenarios use a fixed seeded PRNG, deterministic cause distribution, deterministic amount generation, and randomized treatment/control assignment from the same seed.
-- Rationale: the exact 500-case dataset and result can be reproduced from source; changing the seed or assumptions is an explicit methodology change.
+- **Backoff is persisted, not implemented with in-memory sleeps.**
+  - `scheduled_actions` stores future work and a polling worker claims due jobs.
+  - Why: in-memory timers disappear when the process restarts.
 
-### Recovery probabilities are assumptions, not empirical claims
-- **Decision:** cause-specific control/treatment probabilities are declared in source and documentation as benchmark assumptions.
-- Rationale: simulated lift is useful for testing evaluation mechanics, but it must not be described as observed merchant performance or real recovered money.
+- **Respect provider retry signals.**
+  - Honor `Retry-After` when available; otherwise use bounded exponential backoff and deterministic jitter for transient failures.
+  - Why: retry behavior should cooperate with the provider and avoid synchronized retry storms.
 
-## Post-merge baseline hardening — 2026-09-05
+- **Automated retries are capped.**
+  - After the limit is exhausted, create a durable human escalation.
+  - Why: repeated automated attempts should not continue indefinitely.
 
-### Green CI is necessary but test composition must also be preserved
-- **Decision:** `test:core` explicitly includes policy, verifier, dashboard, intelligence, channels, and competitive-benchmark suites.
-- CI also smoke-tests the channel console and channel APIs, not only the merchant dashboard.
-- Rationale: PR #10 remained green after its merge resolution dropped `test:channels`; a green aggregate command is only meaningful if every intended suite still participates.
+## Conversation decisions
 
-### Customer contact caps are claimed before provider execution
-- **Decision:** Phase C obtains a per-customer PostgreSQL advisory transaction lock, checks the 24-hour contact count, and inserts a `pending` outbound-contact reservation before calling an external communication provider.
-- Provider success converts the reservation to the final delivery state; provider failure releases the pending reservation.
-- Rationale: a check-then-send flow allowed concurrent requests to both observe room under the cap and contact the same customer twice.
+- **Conversation uses the same trusted recovery context as automation.**
+  - Each customer turn is provided the latest verified diagnosis, recovery plan, contact/retry state, and Promise-to-Pay state.
+  - Why: the conversational agent should be part of the recovery loop, not a disconnected chatbot.
 
-## Final AI recovery-agent phase — 2026-09-05
+- **Trusted identity and amount remain backend-owned.**
+  - The model cannot redefine who the customer is or how much is owed.
+  - Why: financial state must come from trusted persisted data.
 
-### AI plans recovery; deterministic systems still own trust and authorization
-- **Decision:** replace the automated pipeline's one-shot action recommendation with a structured, versioned recovery plan containing an objective, one primary action, one fallback action, reasoning, escalation criteria, and stop conditions.
-- Only actions from the existing bounded menu are allowed. The deterministic verifier and policy gate still run outside the model; only the policy-approved primary action executes in that planning cycle. The fallback is stored as auditable planning context, not a hidden second side effect.
-- Rationale: this makes AI responsible for the ambiguous recovery strategy problem without giving it authority over webhook trust, policy limits, idempotency, payment amounts, or recovered-money accounting.
+- **Tool calls reuse existing policy-gated services.**
+  - Payment Link generation, Promise-to-Pay, risk checks, and human escalation go through backend services.
+  - Why: conversational AI should not create a second unsafe execution path.
 
-### Replanning is driven by business outcomes, not infrastructure failures
-- **Decision:** successful interventions create a durable `ai_outcome_review`; if the case remains unresolved at review time, the existing recovery worker re-enters the planner in `REPLAN` mode with the previous plan and new business observation. A due-but-unpaid Promise-to-Pay also enters the same replanning path.
-- HTTP 429, 5xx, `Retry-After`, network errors, worker crashes, and database failures remain in deterministic retry/error handling and are explicitly excluded from AI business reasoning.
-- Rationale: an LLM can reason about changing customer/payment intent, but transport reliability is better handled by bounded deterministic systems.
+## Promise-to-Pay decisions
 
-### Outcome reviews are tied to the intervention they were created for
-- **Decision:** an `ai_outcome_review` carrying an older intervention ID is cancelled if a newer intervention already exists when the review fires.
-- Rationale: an old timer should not trigger another plan after a newer customer/recovery decision has already superseded the action it was meant to evaluate.
+- **A Promise-to-Pay is durable workflow state.**
+  - Store amount, due time, source, status, and reminder work.
+  - Why: “I will pay tomorrow” should survive process restarts and be tracked like a business commitment.
 
-### Immediate retry idempotency advances with the logical attempt
-- **Decision:** `retry_now` no longer always uses `attempt_1`; the current DB-backed automated retry count determines the next logical attempt number, while the policy cap remains authoritative.
-- Rationale: one-shot execution never exposed this issue, but replanning can legitimately choose another immediate retry. Reusing `attempt_1` would incorrectly classify that later authorized attempt as a duplicate.
+- **Only explicit commitments create a promise.**
+  - Vague intent is not enough.
+  - Why: the model must not manufacture a financial commitment from uncertain language.
 
-### Recovery memory is outcome-informed, not model retraining
-- **Decision:** the planner receives SQL-aggregated terminal outcomes for comparable root causes plus prior customer recovery outcomes. Provider-confirmed `trusted_payment_link_paid` remains the recovery definition.
-- This is described as **outcome-informed decision making**, not continuous learning or online model training.
-- Rationale: history can improve contextual strategy selection without overstating that the model weights are being retrained.
+- **Only one active pending promise per case.**
+  - Replacing a promise cancels the old promise and its pending reminder before creating the new one.
+  - Why: stale reminders must not act on superseded commitments.
 
-### Customer conversation uses the same live recovery context
-- **Decision:** refresh the conversational agent's system context on every inbound turn with the latest verified diagnosis, recovery plan, retry/contact state, and active Promise-to-Pay instead of permanently reusing the first system prompt.
-- Existing tools remain policy-gated: payment link, Promise-to-Pay, risk check, and human escalation. Trusted identity and amount remain backend-owned.
-- Rationale: customer language is a business observation in the same recovery loop; a generic chatbot with stale context would be disconnected from the automated recovery plan.
+- **Trusted payment success fulfills the promise and cancels future work.**
+  - Why: once payment is confirmed, all recovery automation should stop.
 
-### AI-vs-rules evaluation must be policy-fair
-- **Decision:** the contextual decision benchmark compares **static rules + the same deterministic policy gate** against **AI planner + the same deterministic policy gate**. It scores final allowed actions on labeled context-dependent scenarios.
-- Scenarios intentionally include cases where policy alone fixes both arms equally and cases where history/previous-plan context must change the strategy while policy would still permit the static rule.
-- Rationale: giving the AI credit for retry/contact limits already enforced by deterministic code would be a misleading benchmark.
+## Omnichannel decisions
 
-### AI decision quality and revenue evidence remain separate
-- **Decision:** `npm run evaluate:ai` is explicitly a labeled contextual decision benchmark, not a recovered-revenue or causal business-lift claim. Its output must never be added to provider-confirmed recovery metrics.
-- Real Groq benchmark results should only be quoted after local execution with the actual model. Real recovered revenue remains sourced only from trusted Razorpay outcomes.
-- Rationale: the project should be able to answer “why AI?” with measurable decision behavior without fabricating a revenue-lift claim.
+- **Email, SMS, WhatsApp, and voice share one channel service.**
+  - Why: each channel should obey the same terminal-state, quiet-hours, contact-cap, and trusted-data rules.
+
+- **Customer contact capacity is reserved before provider execution.**
+  - A per-customer PostgreSQL advisory lock protects the 24-hour cap from concurrent sends.
+  - Why: check-then-send logic can allow two requests to contact the customer at the same time.
+
+- **Quiet hours are enforced deterministically.**
+  - Automated outreach can be deferred; manual outreach is blocked until the allowed window.
+  - Why: contact compliance should not live inside an AI prompt.
+
+- **Channel delivery never changes recovered revenue.**
+  - Why: a sent email, SMS, WhatsApp message, or voice call is communication activity, not a payment outcome.
+
+## Audit and observability decisions
+
+- **Keep an append-only audit trail of important recovery stages.**
+  - Diagnosis, verification, planning, policy, action execution, outcome handling, and escalation are recorded.
+  - Why: payment recovery needs explainability and post-incident traceability.
+
+- **Enforce append-only behavior inside PostgreSQL.**
+  - A trigger rejects normal `UPDATE` and `DELETE` on `audit_log`.
+  - Why: application convention alone is too weak.
+
+- **Use precise terminology.**
+  - Call it a **database-enforced append-only audit trail**, not a cryptographically immutable ledger.
+  - Why: the guarantee should match what the system actually enforces.
+
+## Evaluation decisions
+
+- **Keep model-quality benchmarks separate from revenue outcomes.**
+  - `evaluate:ai` measures contextual decision quality.
+  - The competitive 500-case benchmark is synthetic/counterfactual.
+  - Trusted paid outcomes are the source of recovery accounting.
+  - Why: model accuracy, simulated lift, and actual payment outcomes are different evidence classes.
+
+- **Compare AI and static rules with the same deterministic policy gate.**
+  - Why: the AI should only get credit for better contextual planning, not for safety rules that deterministic code already provides.
+
+- **Use fixed seeds for synthetic benchmarks.**
+  - Why: benchmark results should be reproducible.
+
+- **Ground truth is causal.**
+  - An outage label is only used when enough earlier evidence existed at decision time.
+  - Why: an evaluation should not reward a system for knowing the future.
+
+## Repository and CI decisions
+
+- **Keep the repository reproducible.**
+  - Standard root layout, `.env.example`, Docker Compose, ordered SQL migrations, migration runner, valid `package.json`, and no tracked `node_modules`.
+  - Why: a reviewer should be able to clone and understand how the system is started and tested.
+
+- **Aggregate tests must include every intended subsystem.**
+  - `test:core` includes typecheck, policy, verifier, dashboard, intelligence, channels, competitive benchmark, and final AI tests.
+  - Why: a green command is only meaningful when the full intended suite is actually included.
+
+- **The live merchant console is a read/operate layer over persisted recovery state.**
+  - It shows case status, plan history, audit activity, conversations, scheduled work, Promise-to-Pay, and guarded test actions.
+  - Why: judges and operators need to see the recovery loop as a live system rather than only reading terminal logs.

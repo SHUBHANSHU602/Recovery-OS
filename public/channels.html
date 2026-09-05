@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Recovery OS — Recovery Channels</title>
+  <link rel="stylesheet" href="/channels.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <a href="/" class="back">← Merchant Console</a>
+      <p class="eyebrow">Phase C · Omnichannel Recovery</p>
+      <h1>Recovery Channels</h1>
+      <p class="sub">Email, SMS, WhatsApp and voice behind the same deterministic recovery boundary.</p>
+    </div>
+    <button id="refresh" class="button secondary">Refresh</button>
+  </header>
+
+  <main>
+    <section class="panel">
+      <div class="panel-head"><div><p class="eyebrow">Provider status</p><h2>Delivery adapters</h2></div></div>
+      <div id="provider-grid" class="provider-grid"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><div><p class="eyebrow">Manual recovery contact</p><h2>Send through policy-gated channels</h2><p class="muted">Missing provider credentials fall back to an explicitly simulated delivery. Simulation is never presented as a real provider send.</p></div></div>
+      <form id="send-form" class="send-grid">
+        <label>Recovery case ID<input id="case-id" type="number" min="1" required placeholder="43" /></label>
+        <label>Channel
+          <select id="channel" required>
+            <option value="email">Email</option>
+            <option value="sms">SMS</option>
+            <option value="whatsapp">WhatsApp</option>
+            <option value="voice">Voice</option>
+          </select>
+        </label>
+        <label class="wide">Optional custom message<textarea id="message" rows="4" placeholder="Leave blank to use the trusted amount/root-cause recovery message"></textarea></label>
+        <button class="button" type="submit">Send recovery contact</button>
+      </form>
+      <div id="send-result" class="result" hidden></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head split"><div><p class="eyebrow">Delivery ledger</p><h2>Recent channel attempts</h2></div></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>ID</th><th>Case</th><th>Channel</th><th>Recipient</th><th>Provider</th><th>Status</th><th>Created</th></tr></thead>
+          <tbody id="deliveries"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+  <script src="/channels.js" defer></script>
+</body>
+</html>
